@@ -245,14 +245,9 @@ impl OrientClassifier {
         let output_2d = output.into_dimensionality::<ndarray::Ix2>()
             .map_err(|e| EngineError::OutputError(format!("Invalid output shape: {}", e)))?;
 
-        let logits = output_2d.row(0);
-        let num_classes = logits.len();
-        
-        // Apply softmax and find max
-        let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        
-        let exp_sum: f32 = logits.iter().map(|&x| (x - max_logit).exp()).sum();
-        let probs: Vec<f32> = logits.iter().map(|&x| (x - max_logit).exp() / exp_sum).collect();
+        let row: Vec<f32> = output_2d.row(0).to_vec();
+        let num_classes = row.len();
+        let probs = probabilities(&row);
 
         let (class_id, &confidence) = probs
             .iter()
@@ -266,9 +261,67 @@ impl OrientClassifier {
     }
 }
 
+/// Turn one row of model output into class probabilities.
+///
+/// Some orientation models (for example PaddleClas PULC `rapid_orientation.onnx`)
+/// already end in a `Softmax` node, so their output is a probability
+/// distribution. Applying softmax a second time flattens it: a confident
+/// `[0.9, 0.03, 0.03, 0.03]` becomes about `[0.45, 0.18, 0.18, 0.18]`, and the
+/// confidence can never pass a threshold such as 0.9. Other models output raw
+/// logits and need the softmax. A row counts as probabilities when every value
+/// is in `[0, 1]` and the sum is within `1e-3` of 1.0; otherwise softmax is applied.
+fn probabilities(logits: &[f32]) -> Vec<f32> {
+    const EPS: f32 = 1e-6;
+    let in_range = logits.iter().all(|&x| (-EPS..=1.0 + EPS).contains(&x));
+    let sum: f32 = logits.iter().sum();
+    if !logits.is_empty() && in_range && (sum - 1.0).abs() <= 1e-3 {
+        return logits.to_vec();
+    }
+
+    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let exp_sum: f32 = logits.iter().map(|&x| (x - max_logit).exp()).sum();
+    logits
+        .iter()
+        .map(|&x| (x - max_logit).exp() / exp_sum)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn top(row: &[f32]) -> (usize, f32) {
+        let probs = probabilities(row);
+        let (i, &c) = probs
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .unwrap();
+        (i, c)
+    }
+
+    #[test]
+    fn test_probabilities_pass_through() {
+        let row = [0.9, 0.04, 0.03, 0.03];
+        assert_eq!(probabilities(&row), row.to_vec());
+        let (class, conf) = top(&row);
+        assert_eq!(class, 0);
+        assert!((conf - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_logits_are_softmaxed() {
+        let (class, conf) = top(&[4.0, 0.0, 0.0, 0.0]);
+        assert_eq!(class, 0);
+        assert!((conf - 0.948).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_two_class_probabilities_pass_through() {
+        let (class, conf) = top(&[0.2, 0.8]);
+        assert_eq!(class, 1);
+        assert!((conf - 0.8).abs() < 1e-6);
+    }
 
     #[test]
     fn test_rotate_box_points_back_90() {
