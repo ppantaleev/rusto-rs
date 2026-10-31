@@ -5,7 +5,7 @@ All notable changes to RustO! will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-10-31
 
 ### Added
 - **doc**: scripts/download_doc_models.sh downloads and verifies RapidAI orientation v2, PP-DocLayoutV3 and SLANet_plus models (Apache-2.0)
@@ -21,6 +21,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **layout**: LayoutConfig defaults 800 px, mean 0/std 1, conf_thresh 0.5 (was 0.4, unused); LayoutType is #[non_exhaustive]
 - **table**: TableStructureConfig and TableModelType are #[non_exhaustive]; the default config is now SLANet_plus (`models/DocOCR/table_slanetplus.rten`) and the recogniser rejects the SLANeXt model types
 - **table**: TableCell.bbox is absolute page pixels (percent-of-crop convention removed); TableCell.score added
+- **cli**: Behaviour change: `--orient-model` without `--enable-orient` is now a clap error; `--enable-orient` now runs orientation (before, the flag had no effect); `--layout-model`, `--table-model` and `--save-corrected` also require their enabling flag
+- **orient**: The model loader selects `.rten`/`.onnx` by extension and rejects other extensions, also for the legacy line classifier
+- **flutter**: Poll asynchronously for OCR completion in example widget test; add inline code documentation (@byrizki)
+- **docs**: Added "Document Layout, Tables & Orientation" guide; CLI and orientation guides updated; documentation is English only (`docs/content/id` not updated)
+- **tests**: Ignored timing test `tests/doc_timing_test.rs` (orientation, layout, table structure only, full page)
+
+### Fixed
+- **table**: Place colspan cells only where the whole span is free
+- **orient**: Do not re-apply softmax to models that already output probabilities
+- **bindings**: Synchronize UniFFI generated bindings checksums and enhance flutter failure diagnostics (@byrizki)
+- Flutter example ci, pypi release action, dart & flutter pub score, flutter ci release (@byrizki)
+
+### Known limitations
+- Layout, orientation and table stages are unsupported with the `use-opencv` backend. `cargo check --features use-opencv` was not run: not checked, OpenCV not installed on the build machine; CI does not build it
+- All boxes of `DocResult` are in corrected-page space; check `DocResult::stages` (an orientation `Failed` stage means the page was not rotated) and use `rotate_box_back` with `orientation.applied_degrees` for scan coordinates
+- Markdown output does not escape OCR text
+- Formulas, algorithms, images, charts and seals are located but not recognised
+- Table structure is not attempted when OCR of the table crop fails
+
+### Attribution
+- SLANet_plus pre-processing, structure dictionary handling and token decoding are translated from `bobine` 0.7.3 (`src/rapid_table.rs`, https://github.com/opticsWolf/bobine), used under its MIT option; Copyright (c) 2026 opticsWolf. Notice in the header of `src/table.rs`
+- Models (downloaded by `scripts/download_doc_models.sh`, not bundled): RapidAI orientation v2, PaddlePaddle PP-DocLayoutV3 and SLANet_plus, all Apache-2.0
+
+### Performance (Apple M5 Pro, release, 1240x1754 page, median of 5 after warm-up)
+- Orientation 7 ms, layout 474 ms, table structure only 21 ms (945x184 crop), table stage including crop OCR about 300 ms, whole page about 1.9 s, peak RSS about 1.7 GB
 
 ## [0.3.2] - 2026-10-25
 
@@ -277,7 +302,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Project Status
 
-**Version**: 0.3.2  
+**Version**: 0.4.0  
 **Status**: Production Ready  
 **Accuracy**: 99.3% OpenCV parity  
-**Last Updated**: October 25, 2026
+**Last Updated**: October 31, 2026

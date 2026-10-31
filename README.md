@@ -320,6 +320,20 @@ cargo run --release -- --det-model det.rten --rec-model rec.rten --dict dict.txt
 
 ---
 
+## 📄 Document layout, tables and orientation
+
+Since 0.4.0 `DocPipeline` corrects page rotation (RapidAI orientation v2), finds typed regions in reading order (PP-DocLayoutV3), runs OCR per region and recovers table structure with spans (SLANet_plus), all in pure Rust. Output is JSON or Markdown.
+
+```bash
+scripts/download_doc_models.sh --convert-rten
+cargo run --release -- --det-model det.onnx --rec-model rec.onnx --dict dict.txt \
+  --enable-orient --enable-layout --enable-table --format markdown page.jpg
+```
+
+Library use: `examples/document_layout.rs`. All boxes are in corrected-page coordinates (`rotate_box_back` maps them to the scan); check `DocResult::stages` for failed stages. The OpenCV backend does not support these stages. See the [guide](docs/content/en/03.advance-guide/09.document-layout-and-tables.md).
+
+---
+
 ## 🧠 Supported OCR Models & Tiers
 
 RustO! supports PP-OCRv6 (recognizing 50+ languages simultaneously with a unified dictionary) alongside legacy v5/v4 models:
@@ -381,6 +395,7 @@ Explore deep-dive guides and comprehensive references on the [RustO! Documentati
 | **Spatial Layout Reconstruction** | 2D XY spatial layout reconstruction for invoices, receipts, and multi-column tables | [Read Guide](https://byrizki.com/rusto-rs/en/advance-guide/spatial-layout-reconstruction) |
 | **Image Preprocessing & Tuning** | DBNet binarization thresholds, polygon unclipping, morphological dilation, and dimension limits | [Read Guide](https://byrizki.com/rusto-rs/en/advance-guide/image-preprocessing-and-tuning) |
 | **Orientation & Classification** | 180° line direction classifier and 0°/90°/180°/270° document page rotation | [Read Guide](https://byrizki.com/rusto-rs/en/advance-guide/classification-and-orientation) |
+| **Document Layout & Tables** | Page orientation, PP-DocLayoutV3 layout, SLANet_plus tables, Markdown output | [Read Guide](https://byrizki.com/rusto-rs/en/advance-guide/document-layout-and-tables) |
 | **Performance & Benchmarks** | Latency, memory footprint, and parity benchmarks across x86-64, ARM64, and mobile | [Read Guide](https://byrizki.com/rusto-rs/en/advance-guide/performance-and-benchmarks) |
 | **Troubleshooting Guide** | Resolving model paths, Android JNI linking, React Native pods, and high-resolution camera OOM | [Read Guide](https://byrizki.com/rusto-rs/en/advance-guide/troubleshooting) |
 | **v0.2 → v0.3 Migration Guide** | Upgrading to pure-Rust RTen, .rten model formats, EngineSession, and @rustors scope | [Read Guide](https://byrizki.com/rusto-rs/en/advance-guide/migration-guide) |
