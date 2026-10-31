@@ -505,6 +505,7 @@ mod tests {
         let p = std::env::temp_dir().join("rusto-stage-test-model.bin");
         std::fs::write(&p, b"x").unwrap();
         let msg = load_stage_session("table", &p, &EngineConfig::default()).err().unwrap().to_string();
+        let _ = std::fs::remove_file(&p);
         assert!(msg.contains("table model must be a .rten or .onnx file"), "{msg}");
     }
 }

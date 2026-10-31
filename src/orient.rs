@@ -537,23 +537,55 @@ mod tests {
     fn solid(w: u32, h: u32, v: u8) -> Mat { Mat::new(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, image::Rgb([v, v, v])))) }
     fn out(o: Orientation, c: f32) -> OrientOutput { OrientOutput { orientation: o, confidence: c, elapse: 0.0 } }
 
+    /// Black image with an RGB(255, 128, 0) rectangle `x0..x1` x `y0..y1`.
+    fn rect_image(w: u32, h: u32, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> Mat {
+        let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([0, 0, 0]));
+        for y in y0..y1 { for x in x0..x1 { img.put_pixel(x, y, image::Rgb([255, 128, 0])); } }
+        Mat::new(image::DynamicImage::ImageRgb8(img))
+    }
+
+    /// Every pixel of the crop must be inside the rectangle (so a plain stretch or a wrong
+    /// crop offset would read black) and normalised per channel with ImageNet mean/std.
+    fn assert_crop_is_rectangle(t: &ndarray::Array4<f32>) {
+        assert_eq!(t.shape(), &[1, 3, 224, 224]);
+        let mean = [0.485f32, 0.456, 0.406];
+        let std = [0.229f32, 0.224, 0.225];
+        let rgb = [255.0f32, 128.0, 0.0];
+        for c in 0..3 {
+            let want = (rgb[c] / 255.0 - mean[c]) / std[c];
+            for (y, x) in [(0, 0), (0, 223), (223, 0), (223, 223), (112, 112)] {
+                assert!((t[[0, c, y, x]] - want).abs() < 1e-3, "channel {c} at ({y},{x}): {} vs {want}", t[[0, c, y, x]]);
+            }
+        }
+    }
+
     #[test]
     fn orient_input_center_crop_uses_imagenet_normalisation() {
-        // 512x256: left half black, right half white. Short side already 256; crop x 144..368, y 16..240.
-        let mut img = image::RgbImage::from_pixel(512, 256, image::Rgb([255, 255, 255]));
-        for y in 0..256 { for x in 0..256 { img.put_pixel(x, y, image::Rgb([0, 0, 0])); } }
+        // 512x256: short side already 256 (scale 1); crop is x 144..368, y 16..240.
         let cfg = OrientConfig::rapid_orientation_v2("unused.rten".into());
-        let t = orient_input(&Mat::new(image::DynamicImage::ImageRgb8(img)), &cfg).unwrap();
-        assert_eq!(t.shape(), &[1, 3, 224, 224]);
-        assert!((t[[0, 0, 100, 0]] - (0.0 - 0.485) / 0.229).abs() < 1e-3);
-        assert!((t[[0, 0, 100, 223]] - (1.0 - 0.485) / 0.229).abs() < 1e-3);
+        let t = orient_input(&rect_image(512, 256, (144, 16, 368, 240)), &cfg).unwrap();
+        assert_crop_is_rectangle(&t);
+    }
+    #[test]
+    fn orient_input_center_crop_resizes_short_side_to_256() {
+        let cfg = OrientConfig::rapid_orientation_v2("unused.rten".into());
+        // Landscape 1024x512 -> 512x256 (crop x 144..368, y 16..240); rectangle is 2 px inside the crop.
+        let t = orient_input(&rect_image(1024, 512, (284, 28, 740, 484)), &cfg).unwrap();
+        assert_crop_is_rectangle(&t);
+        // Portrait 512x1024 -> 256x512 (crop x 16..240, y 144..368).
+        let t = orient_input(&rect_image(512, 1024, (28, 284, 484, 740)), &cfg).unwrap();
+        assert_crop_is_rectangle(&t);
     }
     #[test]
     fn orient_input_stretch_keeps_legacy_scaling() {
+        // Legacy: p / 255, mean/std ignored. (p/255 - 0.5)/0.5 would give 1.0, 0.004, -1.0 here.
         let cfg = OrientConfig::default("unused.rten".into());
-        let t = orient_input(&solid(50, 20, 255), &cfg).unwrap();
+        let img = Mat::new(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(50, 20, image::Rgb([255, 128, 0]))));
+        let t = orient_input(&img, &cfg).unwrap();
         assert_eq!(t.shape(), &[1, 3, 224, 224]);
-        assert!((t[[0, 2, 10, 10]] - 1.0).abs() < 1e-6);
+        assert!((t[[0, 0, 10, 10]] - 1.0).abs() < 1e-6);
+        assert!((t[[0, 1, 10, 10]] - 128.0 / 255.0).abs() < 1e-6);
+        assert!(t[[0, 2, 10, 10]].abs() < 1e-6);
     }
     #[test]
     fn orient_input_tiny_image() {
