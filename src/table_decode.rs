@@ -135,17 +135,20 @@ impl Builder {
     /// the cursor, marking every grid slot it covers as occupied.
     fn place(&mut self, mut cell: GridCell) {
         let row = self.rows - 1;
-        let free = |occ: &Vec<Vec<bool>>, c: usize| {
+        let (rs, cs) = (cell.row_span.max(1), cell.col_span.max(1));
+        // First column at or after the cursor where the whole `cs` slots of the
+        // current row are free (HTML table auto-layout). The scan may run past
+        // the current row width, which extends the row.
+        let slot_free = |occ: &Vec<Vec<bool>>, c: usize| {
             !occ.get(row)
                 .and_then(|r| r.get(c))
                 .copied()
                 .unwrap_or(false)
         };
         let mut col = self.cursor;
-        while !free(&self.occupied, col) {
+        while !(col..col + cs).all(|c| slot_free(&self.occupied, c)) {
             col += 1;
         }
-        let (rs, cs) = (cell.row_span.max(1), cell.col_span.max(1));
         if self.occupied.len() < row + rs {
             self.occupied.resize(row + rs, Vec::new());
         }
@@ -286,6 +289,18 @@ mod tests {
             .map(|c| (c.row, c.col, c.row_span, c.col_span))
             .collect()
     }
+
+    /// Rebuild an occupancy map from the cells and panic on a double claim.
+    fn assert_no_overlap(g: &DecodedGrid) {
+        let mut seen = std::collections::HashSet::new();
+        for c in &g.cells {
+            for r in c.row..c.row + c.row_span {
+                for k in c.col..c.col + c.col_span {
+                    assert!(seen.insert((r, k)), "slot ({r},{k}) claimed twice: {g:?}");
+                }
+            }
+        }
+    }
     const TD: &str = "<td></td>";
 
     #[test]
@@ -296,6 +311,7 @@ mod tests {
             vec![(0, 0, 1, 1), (0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 1, 1)]
         );
         assert_eq!((g.num_rows, g.num_cols, g.malformed), (2, 2, false));
+        assert_no_overlap(&g);
     }
 
     #[test]
@@ -325,6 +341,7 @@ mod tests {
         assert_eq!(cells(&g)[0], (0, 0, 1, 2));
         assert_eq!(cells(&g)[1], (0, 2, 1, 1));
         assert_eq!(g.cells[0].token_index, 2);
+        assert_no_overlap(&g);
     }
 
     #[test]
@@ -343,6 +360,7 @@ mod tests {
         ]);
         assert_eq!(cells(&g), vec![(0, 0, 2, 1), (0, 1, 1, 1), (1, 1, 1, 1)]);
         assert!(!g.malformed);
+        assert_no_overlap(&g);
     }
 
     #[test]
@@ -362,6 +380,50 @@ mod tests {
         ]);
         assert_eq!(cells(&g), vec![(0, 0, 2, 2), (0, 2, 1, 1), (1, 2, 1, 1)]);
         assert_eq!((g.num_rows, g.num_cols, g.malformed), (2, 3, false));
+        assert_no_overlap(&g);
+    }
+
+    #[test]
+    fn decode_colspan_wider_than_gap_skips_occupied_column() {
+        // Row 1 col 1 is taken by the rowspan cell; a colspan=2 cell cannot
+        // fit at col 0 and moves to cols 2-3.
+        let g = decode_structure_tokens(&[
+            "<tr>",
+            TD,
+            "<td",
+            " rowspan=\"2\"",
+            ">",
+            "</td>",
+            "</tr>",
+            "<tr>",
+            "<td",
+            " colspan=\"2\"",
+            ">",
+            "</td>",
+            "</tr>",
+        ]);
+        assert_eq!(cells(&g), vec![(0, 0, 1, 1), (0, 1, 2, 1), (1, 2, 1, 2)]);
+        assert_eq!((g.num_rows, g.num_cols, g.malformed), (2, 4, false));
+        assert_no_overlap(&g);
+    }
+
+    #[test]
+    fn decode_single_branch_malformed_cases() {
+        // `</td>` without pending `<td`
+        let g = decode_structure_tokens(&["<tr>", "</td>", "</tr>"]);
+        assert!(g.malformed && g.cells.is_empty());
+        // unknown token
+        let g = decode_structure_tokens(&["<tr>", "<b>", "</tr>"]);
+        assert!(g.malformed && g.cells.is_empty());
+        // `</tr>` with pending `<td`: cell kept
+        let g = decode_structure_tokens(&["<tr>", "<td", "</tr>"]);
+        assert!(g.malformed);
+        assert_eq!(cells(&g), vec![(0, 0, 1, 1)]);
+        // `<tr>` with pending `<td`: cell placed in the old row
+        let g = decode_structure_tokens(&["<tr>", "<td", "<tr>", "</tr>"]);
+        assert!(g.malformed);
+        assert_eq!((g.num_rows, g.num_cols), (2, 1));
+        assert_eq!(cells(&g), vec![(0, 0, 1, 1)]);
     }
 
     #[test]
