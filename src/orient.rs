@@ -358,7 +358,7 @@ fn center_crop_input(image: &Mat, cfg: &OrientConfig, resize_short: u32) -> Resu
 /// confidence can never pass a threshold such as 0.9. Other models output raw
 /// logits and need the softmax. A row counts as probabilities when every value
 /// is in `[0, 1]` and the sum is within `1e-3` of 1.0; otherwise softmax is applied.
-fn probabilities(logits: &[f32]) -> Vec<f32> {
+pub(crate) fn probabilities(logits: &[f32]) -> Vec<f32> {
     const EPS: f32 = 1e-6;
     let in_range = logits.iter().all(|&x| (-EPS..=1.0 + EPS).contains(&x));
     let sum: f32 = logits.iter().sum();
