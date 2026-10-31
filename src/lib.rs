@@ -71,11 +71,11 @@ pub use rusto_ocr::{DetectionRunOptions, PostprocessRunOptions};
 pub use det::TextDetector;
 pub use doc_pipeline::{DocBlock, DocPipeline, DocPipelineConfig, DocResult};
 pub use layout::{LayoutDetector, LayoutOutput, LayoutRegion, LayoutType};
-pub use orient::{OrientClassifier, OrientOutput, Orientation};
+pub use orient::{decide_orientation, rotate_box, rotate_box_back, rotate_point_back, OrientClassifier, OrientOutput, Orientation, PageOrientation};
 pub use rec::{TextRecOutput, TextRecognizer, WordInfo, WordType};
 pub use rusto_ocr::{DetectTextResult, ImageSource, OcrRunOptions, OutputGranularity, RustO};
 pub use table::{TableDetector, TableDetectorConfig, TableModelType, TableStructure, TableStructureConfig, TableStructureRecognizer};
-pub use types::{ClsConfig, DetConfig, Frame, GlobalConfig, LayoutConfig, OrientConfig, RecConfig};
+pub use types::{ClsConfig, DetConfig, Frame, GlobalConfig, LayoutConfig, OrientConfig, OrientPreprocess, RecConfig};
 
 // Re-export for easier access
 pub use crate::engine::{EngineError, EngineSession, InferenceSession, RtenSession};

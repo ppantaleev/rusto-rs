@@ -258,6 +258,35 @@ fn resolve_model_path(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Load the model of a document-analysis stage (`stage` is used in error
+/// messages, for example `"layout"`). The path is resolved like any other model
+/// path; a missing file or an extension other than `.rten`/`.onnx` is reported
+/// with the stage name instead of an opaque loader error.
+pub(crate) fn load_stage_session(
+    stage: &str,
+    model_path: &Path,
+    cfg: &EngineConfig,
+) -> Result<EngineSession, EngineError> {
+    let resolved = resolve_model_path(model_path);
+    if !resolved.exists() {
+        return Err(EngineError::Engine(format!(
+            "{stage} model not found: {}",
+            model_path.display()
+        )));
+    }
+    let ok_ext = resolved
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("rten") || e.eq_ignore_ascii_case("onnx"));
+    if !ok_ext {
+        return Err(EngineError::Engine(format!(
+            "{stage} model must be a .rten or .onnx file: {}",
+            model_path.display()
+        )));
+    }
+    EngineSession::from_path(&resolved, cfg)
+}
+
 fn convert_output_to_array(value: &rten::Value) -> Result<ArrayD<f32>, EngineError> {
     match value {
         rten::Value::FloatTensor(t) => {
@@ -457,5 +486,25 @@ impl InferenceSession for RtenSession {
 
     fn have_key(&self, key: &str) -> bool {
         self.have_key(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_stage_session_reports_missing_path() {
+        let err = load_stage_session("layout", Path::new("models/DocOCR/nope.rten"), &EngineConfig::default()).err().unwrap();
+        let msg = err.to_string();
+        assert!(msg.contains("layout model not found") && msg.contains("nope.rten"), "{msg}");
+    }
+
+    #[test]
+    fn load_stage_session_rejects_unknown_extension() {
+        let p = std::env::temp_dir().join("rusto-stage-test-model.bin");
+        std::fs::write(&p, b"x").unwrap();
+        let msg = load_stage_session("table", &p, &EngineConfig::default()).err().unwrap().to_string();
+        assert!(msg.contains("table model must be a .rten or .onnx file"), "{msg}");
     }
 }

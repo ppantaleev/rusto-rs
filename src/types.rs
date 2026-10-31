@@ -326,6 +326,19 @@ impl RecConfig {
     }
 }
 
+/// How an image is turned into the orientation model input tensor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum OrientPreprocess {
+    /// Stretch the whole image to `orient_image_shape`, scale to `[0, 1]`
+    /// (`mean`/`std` are not applied). This is the historic behaviour and is
+    /// also used by the text-line classifier.
+    #[default]
+    Stretch,
+    /// Resize so the short side is `resize_short` (aspect ratio kept), centre
+    /// crop to `orient_image_shape`, then `(p / 255 - mean) / std`.
+    ShortSideCenterCrop { resize_short: u32 },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OrientConfig {
     pub engine_type: EngineType,
@@ -339,6 +352,8 @@ pub struct OrientConfig {
     pub orient_batch_num: i32,
     pub orient_thresh: f32,
     pub engine_cfg: EngineConfig,
+    #[serde(default)]
+    pub preprocess: OrientPreprocess,
 }
 
 impl OrientConfig {
@@ -355,6 +370,22 @@ impl OrientConfig {
             orient_batch_num: 1,
             orient_thresh: 0.9,
             engine_cfg: EngineConfig::default(),
+            preprocess: OrientPreprocess::Stretch,
+        }
+    }
+
+    /// RapidAI `rapid_orientation` v2 (PaddleClas PP-LCNet_x1_0_doc_ori): resize
+    /// short side to 256, centre crop 224x224, ImageNet mean/std. Outputs four
+    /// probabilities for the classes 0/90/180/270.
+    pub fn rapid_orientation_v2(model_path: PathBuf) -> Self {
+        Self {
+            orient_image_shape: [3, 224, 224],
+            mean: [0.485, 0.456, 0.406],
+            std: [0.229, 0.224, 0.225],
+            confidence_threshold: 0.9,
+            orient_thresh: 0.9,
+            preprocess: OrientPreprocess::ShortSideCenterCrop { resize_short: 256 },
+            ..Self::default(model_path)
         }
     }
 }

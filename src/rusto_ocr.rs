@@ -245,6 +245,7 @@ impl RustO {
                 orient_batch_num: cls_cfg.cls_batch_num,
                 orient_thresh: cls_cfg.cls_thresh,
                 engine_cfg: cls_cfg.engine_cfg,
+                preprocess: crate::types::OrientPreprocess::Stretch,
             };
             Some(OrientClassifier::new(orient_cfg)?)
         } else {
@@ -309,6 +310,7 @@ impl RustO {
                 orient_batch_num: cls_cfg.cls_batch_num,
                 orient_thresh: cls_cfg.cls_thresh,
                 engine_cfg: cls_cfg.engine_cfg,
+                preprocess: crate::types::OrientPreprocess::Stretch,
             };
             Some(OrientClassifier::new(orient_cfg)?)
         } else {

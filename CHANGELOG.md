@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **doc**: scripts/download_doc_models.sh downloads and verifies RapidAI orientation v2, PP-DocLayoutV3 and SLANet_plus models (Apache-2.0)
+- **orient**: OrientConfig::rapid_orientation_v2 (resize-short 256, centre crop 224, ImageNet normalisation), PageOrientation, rotate_box_back
 
 ## [0.3.2] - 2026-10-25
 

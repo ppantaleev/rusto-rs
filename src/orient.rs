@@ -9,19 +9,28 @@ use opencv::prelude::*;
 #[cfg(not(feature = "use-opencv"))]
 use crate::image_impl::{Mat, Point2f};
 
-use crate::engine::{EngineError, EngineSession, InferenceSession};
-use crate::types::OrientConfig;
+use crate::engine::{load_stage_session, EngineError, EngineSession, InferenceSession};
+use crate::layout::BBox;
+use crate::types::{OrientConfig, OrientPreprocess};
 
-/// Orientation classification result
+/// Orientation classification result: the model's class label.
+///
+/// Direction convention (verified with `orient_rapidai_v2` on all four
+/// rotations of `tests/fixtures/doc/page_text.png`): label `N` means the
+/// scanned content is rotated `N` degrees clockwise relative to upright
+/// (`DynamicImage::rotate90` produces a label-90 scan). [`Orientation::rotate_image`]
+/// undoes this by rotating the scan clockwise by
+/// [`Orientation::correction_cw_degrees`] (label 90 -> 270 clockwise, label 270
+/// -> 90 clockwise, label 180 -> 180).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Orientation {
-    /// 0 degrees (normal)
+    /// Label 0: the page is upright
     Normal = 0,
-    /// 90 degrees clockwise
+    /// Label 90
     Rotate90 = 1,
-    /// 180 degrees
+    /// Label 180
     Rotate180 = 2,
-    /// 270 degrees clockwise (90 counter-clockwise)
+    /// Label 270
     Rotate270 = 3,
 }
 
@@ -43,6 +52,27 @@ impl Orientation {
                 3 => Orientation::Rotate270,
                 _ => Orientation::Normal,
             }
+        }
+    }
+
+    /// The model's class label in degrees: 0, 90, 180 or 270.
+    pub fn label_degrees(&self) -> u16 {
+        match self {
+            Orientation::Normal => 0,
+            Orientation::Rotate90 => 90,
+            Orientation::Rotate180 => 180,
+            Orientation::Rotate270 => 270,
+        }
+    }
+
+    /// Clockwise rotation (0/90/180/270) that [`Orientation::rotate_image`]
+    /// applies to the scan to obtain the corrected page.
+    pub fn correction_cw_degrees(&self) -> u16 {
+        match self {
+            Orientation::Normal => 0,
+            Orientation::Rotate90 => 270,
+            Orientation::Rotate180 => 180,
+            Orientation::Rotate270 => 90,
         }
     }
 
@@ -139,7 +169,7 @@ pub struct OrientClassifier {
 
 impl OrientClassifier {
     pub fn new(config: OrientConfig) -> Result<Self, EngineError> {
-        let session = EngineSession::from_path(&config.model_path, &config.engine_cfg)?;
+        let session = load_stage_session("orientation classifier", &config.model_path, &config.engine_cfg)?;
         Ok(Self { session, config })
     }
 
@@ -173,71 +203,7 @@ impl OrientClassifier {
     }
 
     fn preprocess(&self, image: &Mat) -> Result<Array4<f32>, EngineError> {
-        // Resize to model input size
-        let [_, h, w] = self.config.orient_image_shape;
-        
-        #[cfg(feature = "use-opencv")]
-        {
-            use opencv::{core, imgproc};
-            
-            let mut resized = Mat::default();
-            imgproc::resize(
-                image,
-                &mut resized,
-                core::Size::new(w, h),
-                0.0,
-                0.0,
-                imgproc::INTER_LINEAR,
-            )?;
-
-            let rows = resized.rows() as usize;
-            let cols = resized.cols() as usize;
-            let hw = rows * cols;
-            
-            let mut data = vec![0.0f32; 3 * hw];
-            
-            for i in 0..rows {
-                for j in 0..cols {
-                    let pix = resized.at_2d::<core::Vec3b>(i as i32, j as i32)?;
-                    let idx = i * cols + j;
-                    data[idx] = pix[0] as f32 / 255.0;
-                    data[hw + idx] = pix[1] as f32 / 255.0;
-                    data[2 * hw + idx] = pix[2] as f32 / 255.0;
-                }
-            }
-
-            let arr = Array3::from_shape_vec((3, h as usize, w as usize), data)
-                .map_err(|e| EngineError::Preprocess(e.to_string()))?;
-            
-            Ok(arr.insert_axis(ndarray::Axis(0)))
-        }
-
-        #[cfg(not(feature = "use-opencv"))]
-        {
-            use crate::image_impl::{resize, Size, INTER_LINEAR};
-            
-            let mut resized = Mat::default();
-            resize(image, &mut resized, Size::new(w, h), INTER_LINEAR)?;
-            let (_orig_h, _orig_w) = (image.size()?.height, image.size()?.width);
-            
-            let hw = h as usize * w as usize;
-            let mut data = vec![0.0f32; 3 * hw];
-            
-            for y in 0..h as usize {
-                for x in 0..w as usize {
-                    let pixel = resized.get_pixel(x as u32, y as u32);
-                    let idx = y * w as usize + x;
-                    data[idx] = pixel[0] as f32 / 255.0;
-                    data[hw + idx] = pixel[1] as f32 / 255.0;
-                    data[2 * hw + idx] = pixel[2] as f32 / 255.0;
-                }
-            }
-
-            let arr = Array3::from_shape_vec((3, h as usize, w as usize), data)
-                .map_err(|e| EngineError::Preprocess(e.to_string()))?;
-            
-            Ok(arr.insert_axis(ndarray::Axis(0)))
-        }
+        orient_input(image, &self.config)
     }
 
     fn postprocess(&self, output: ndarray::ArrayD<f32>) -> Result<(Orientation, f32), EngineError> {
@@ -259,6 +225,128 @@ impl OrientClassifier {
 
         Ok((orientation, confidence))
     }
+}
+
+/// Build the model input for `image` according to `cfg.preprocess`.
+pub(crate) fn orient_input(image: &Mat, cfg: &OrientConfig) -> Result<Array4<f32>, EngineError> {
+    match cfg.preprocess {
+        OrientPreprocess::Stretch => stretch_input(image, cfg),
+        OrientPreprocess::ShortSideCenterCrop { resize_short } => center_crop_input(image, cfg, resize_short),
+    }
+}
+
+fn stretch_input(image: &Mat, cfg: &OrientConfig) -> Result<Array4<f32>, EngineError> {
+    // Resize to model input size
+    let [_, h, w] = cfg.orient_image_shape;
+    #[cfg(feature = "use-opencv")]
+    {
+        use opencv::{core, imgproc};
+        
+        let mut resized = Mat::default();
+        imgproc::resize(
+            image,
+            &mut resized,
+            core::Size::new(w, h),
+            0.0,
+            0.0,
+            imgproc::INTER_LINEAR,
+        )?;
+
+        let rows = resized.rows() as usize;
+        let cols = resized.cols() as usize;
+        let hw = rows * cols;
+        
+        let mut data = vec![0.0f32; 3 * hw];
+        
+        for i in 0..rows {
+            for j in 0..cols {
+                let pix = resized.at_2d::<core::Vec3b>(i as i32, j as i32)?;
+                let idx = i * cols + j;
+                data[idx] = pix[0] as f32 / 255.0;
+                data[hw + idx] = pix[1] as f32 / 255.0;
+                data[2 * hw + idx] = pix[2] as f32 / 255.0;
+            }
+        }
+
+        let arr = Array3::from_shape_vec((3, h as usize, w as usize), data)
+            .map_err(|e| EngineError::Preprocess(e.to_string()))?;
+        
+        Ok(arr.insert_axis(ndarray::Axis(0)))
+    }
+
+    #[cfg(not(feature = "use-opencv"))]
+    {
+        use crate::image_impl::{resize, Size, INTER_LINEAR};
+        
+        let mut resized = Mat::default();
+        resize(image, &mut resized, Size::new(w, h), INTER_LINEAR)?;
+        let (_orig_h, _orig_w) = (image.size()?.height, image.size()?.width);
+        
+        let hw = h as usize * w as usize;
+        let mut data = vec![0.0f32; 3 * hw];
+        
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let pixel = resized.get_pixel(x as u32, y as u32);
+                let idx = y * w as usize + x;
+                data[idx] = pixel[0] as f32 / 255.0;
+                data[hw + idx] = pixel[1] as f32 / 255.0;
+                data[2 * hw + idx] = pixel[2] as f32 / 255.0;
+            }
+        }
+
+        let arr = Array3::from_shape_vec((3, h as usize, w as usize), data)
+            .map_err(|e| EngineError::Preprocess(e.to_string()))?;
+        
+        Ok(arr.insert_axis(ndarray::Axis(0)))
+    }
+}
+
+#[cfg(feature = "use-opencv")]
+fn center_crop_input(_image: &Mat, _cfg: &OrientConfig, _resize_short: u32) -> Result<Array4<f32>, EngineError> {
+    Err(EngineError::Engine(
+        "orientation pre-processing ShortSideCenterCrop is not supported with the OpenCV backend".to_string(),
+    ))
+}
+
+/// Resize so the short side equals `resize_short`, centre crop to the model
+/// shape and apply `(p / 255 - mean) / std` on RGB. When the resized image is
+/// smaller than the crop (only if `resize_short` < crop size) edge pixels are
+/// repeated.
+#[cfg(not(feature = "use-opencv"))]
+fn center_crop_input(image: &Mat, cfg: &OrientConfig, resize_short: u32) -> Result<Array4<f32>, EngineError> {
+    use crate::image_impl::{resize, Size, INTER_LINEAR};
+
+    let [_, ch, cw] = cfg.orient_image_shape;
+    let (ch, cw) = (ch.max(1) as usize, cw.max(1) as usize);
+    let size = image.size().map_err(|e| EngineError::Preprocess(e.to_string()))?;
+    let (w, h) = (size.width.max(1) as f64, size.height.max(1) as f64);
+    let scale = resize_short as f64 / w.min(h);
+    let nw = ((w * scale).round() as i32).max(1);
+    let nh = ((h * scale).round() as i32).max(1);
+
+    let mut resized = Mat::default();
+    resize(image, &mut resized, Size::new(nw, nh), INTER_LINEAR)?;
+
+    let (nw, nh) = (nw as usize, nh as usize);
+    let off_x = nw.saturating_sub(cw) / 2;
+    let off_y = nh.saturating_sub(ch) / 2;
+    let hw = ch * cw;
+    let mut data = vec![0.0f32; 3 * hw];
+    for y in 0..ch {
+        let sy = (off_y + y).min(nh - 1) as u32;
+        for x in 0..cw {
+            let sx = (off_x + x).min(nw - 1) as u32;
+            let pixel = resized.get_pixel(sx, sy);
+            let idx = y * cw + x;
+            for c in 0..3 {
+                data[c * hw + idx] = (pixel[c] as f32 / 255.0 - cfg.mean[c]) / cfg.std[c];
+            }
+        }
+    }
+    let arr = Array3::from_shape_vec((3, ch, cw), data)
+        .map_err(|e| EngineError::Preprocess(e.to_string()))?;
+    Ok(arr.insert_axis(ndarray::Axis(0)))
 }
 
 /// Turn one row of model output into class probabilities.
@@ -284,6 +372,83 @@ fn probabilities(logits: &[f32]) -> Vec<f32> {
         .iter()
         .map(|&x| (x - max_logit).exp() / exp_sum)
         .collect()
+}
+
+/// Page orientation decision. `applied_degrees` is the clockwise rotation
+/// applied to the scan to obtain the corrected page (0 when the classifier was
+/// not confident enough); `detected_degrees` is the model's class label.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct PageOrientation {
+    pub applied_degrees: u16,
+    pub detected_degrees: u16,
+    pub confidence: f32,
+}
+
+/// Apply the correction only when `out.confidence >= min_confidence`.
+pub fn decide_orientation(out: &OrientOutput, min_confidence: f32) -> PageOrientation {
+    let applied = if out.confidence >= min_confidence {
+        out.orientation.correction_cw_degrees()
+    } else {
+        0
+    };
+    PageOrientation {
+        applied_degrees: applied,
+        detected_degrees: out.orientation.label_degrees(),
+        confidence: out.confidence,
+    }
+}
+
+/// Rotate a continuous pixel coordinate clockwise by `cw_degrees` on a
+/// `w x h` image: 90 maps `(x, y)` to `(h - y, x)`, 180 to `(w - x, h - y)`,
+/// 270 to `(y, w - x)`. Other angles return the input.
+fn rotate_point(x: f32, y: f32, cw_degrees: u16, w: f32, h: f32) -> (f32, f32) {
+    match cw_degrees {
+        90 => (h - y, x),
+        180 => (w - x, h - y),
+        270 => (y, w - x),
+        _ => (x, y),
+    }
+}
+
+/// Counter-rotation of `degrees` (0/90/180/270), `None` for other angles.
+fn inverse_degrees(degrees: u16) -> Option<u16> {
+    match degrees {
+        0 => Some(0),
+        90 => Some(270),
+        180 => Some(180),
+        270 => Some(90),
+        _ => None,
+    }
+}
+
+/// Map a point from the corrected page (`corrected_w x corrected_h`) back to the
+/// scan it was rotated from by `applied_degrees` clockwise.
+pub fn rotate_point_back(x: f32, y: f32, applied_degrees: u16, corrected_w: f32, corrected_h: f32) -> (f32, f32) {
+    match inverse_degrees(applied_degrees) {
+        Some(inv) => rotate_point(x, y, inv, corrected_w, corrected_h),
+        None => (x, y),
+    }
+}
+
+/// Rotate an axis-aligned box clockwise by `cw_degrees` on a `src_w x src_h`
+/// image. Degrees other than 0/90/180/270 return the input.
+pub fn rotate_box(bbox: &BBox, cw_degrees: u16, src_w: u32, src_h: u32) -> BBox {
+    let (w, h) = (src_w as i32, src_h as i32);
+    match cw_degrees {
+        90 => BBox { x_min: h - bbox.y_max, y_min: bbox.x_min, x_max: h - bbox.y_min, y_max: bbox.x_max },
+        180 => BBox { x_min: w - bbox.x_max, y_min: h - bbox.y_max, x_max: w - bbox.x_min, y_max: h - bbox.y_min },
+        270 => BBox { x_min: bbox.y_min, y_min: w - bbox.x_max, x_max: bbox.y_max, y_max: w - bbox.x_min },
+        _ => bbox.clone(),
+    }
+}
+
+/// Map a box from the corrected page (`corrected_w x corrected_h`) back to the
+/// scan: equal to `rotate_box(b, (360 - applied) % 360, ...)`.
+pub fn rotate_box_back(bbox: &BBox, applied_degrees: u16, corrected_w: u32, corrected_h: u32) -> BBox {
+    match inverse_degrees(applied_degrees) {
+        Some(inv) => rotate_box(bbox, inv, corrected_w, corrected_h),
+        None => bbox.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -367,5 +532,60 @@ mod tests {
         Orientation::Rotate270.rotate_box_points_back(&mut pts, 200.0, 100.0);
         assert_eq!(pts[0].x, 10.0);
         assert_eq!(pts[0].y, 179.0);
+    }
+
+    fn solid(w: u32, h: u32, v: u8) -> Mat { Mat::new(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, image::Rgb([v, v, v])))) }
+    fn out(o: Orientation, c: f32) -> OrientOutput { OrientOutput { orientation: o, confidence: c, elapse: 0.0 } }
+
+    #[test]
+    fn orient_input_center_crop_uses_imagenet_normalisation() {
+        // 512x256: left half black, right half white. Short side already 256; crop x 144..368, y 16..240.
+        let mut img = image::RgbImage::from_pixel(512, 256, image::Rgb([255, 255, 255]));
+        for y in 0..256 { for x in 0..256 { img.put_pixel(x, y, image::Rgb([0, 0, 0])); } }
+        let cfg = OrientConfig::rapid_orientation_v2("unused.rten".into());
+        let t = orient_input(&Mat::new(image::DynamicImage::ImageRgb8(img)), &cfg).unwrap();
+        assert_eq!(t.shape(), &[1, 3, 224, 224]);
+        assert!((t[[0, 0, 100, 0]] - (0.0 - 0.485) / 0.229).abs() < 1e-3);
+        assert!((t[[0, 0, 100, 223]] - (1.0 - 0.485) / 0.229).abs() < 1e-3);
+    }
+    #[test]
+    fn orient_input_stretch_keeps_legacy_scaling() {
+        let cfg = OrientConfig::default("unused.rten".into());
+        let t = orient_input(&solid(50, 20, 255), &cfg).unwrap();
+        assert_eq!(t.shape(), &[1, 3, 224, 224]);
+        assert!((t[[0, 2, 10, 10]] - 1.0).abs() < 1e-6);
+    }
+    #[test]
+    fn orient_input_tiny_image() {
+        let cfg = OrientConfig::rapid_orientation_v2("unused.rten".into());
+        assert_eq!(orient_input(&solid(20, 10, 128), &cfg).unwrap().shape(), &[1, 3, 224, 224]);
+    }
+    #[test]
+    fn decide_orientation_applies_at_exact_threshold() {
+        let p = decide_orientation(&out(Orientation::Rotate180, 0.6), 0.6);
+        assert_eq!((p.applied_degrees, p.detected_degrees), (180, 180));
+    }
+    #[test]
+    fn decide_orientation_below_threshold_keeps_page() {
+        let p = decide_orientation(&out(Orientation::Rotate90, 0.5999), 0.6);
+        assert_eq!((p.applied_degrees, p.detected_degrees), (0, 90));
+        assert!((p.confidence - 0.5999).abs() < 1e-6);
+    }
+    #[test]
+    fn rotate_box_known_values_and_round_trip() {
+        let b = BBox { x_min: 20, y_min: 10, x_max: 50, y_max: 30 };
+        let r = rotate_box(&b, 90, 200, 100);
+        assert_eq!((r.x_min, r.y_min, r.x_max, r.y_max), (70, 20, 90, 50));
+        for d in [0u16, 90, 180, 270] {
+            let (cw, ch) = if d % 180 == 0 { (200, 100) } else { (100, 200) };
+            let back = rotate_box_back(&rotate_box(&b, d, 200, 100), d, cw, ch);
+            assert_eq!((back.x_min, back.y_min, back.x_max, back.y_max), (20, 10, 50, 30), "degrees {d}");
+        }
+    }
+    #[test]
+    fn correction_is_inverse_of_label() {
+        for o in [Orientation::Normal, Orientation::Rotate90, Orientation::Rotate180, Orientation::Rotate270] {
+            assert_eq!((o.label_degrees() + o.correction_cw_degrees()) % 360, 0);
+        }
     }
 }
