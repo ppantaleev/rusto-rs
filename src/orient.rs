@@ -567,13 +567,13 @@ mod tests {
     #[test]
     fn orient_input_center_crop_uses_imagenet_normalisation() {
         // 512x256: short side already 256 (scale 1); crop is x 144..368, y 16..240.
-        let cfg = OrientConfig::rapid_orientation_v2("unused.rten".into());
+        let cfg = OrientConfig::rapid_orientation_v2("unused.rten");
         let t = orient_input(&rect_image(512, 256, (144, 16, 368, 240), None), &cfg).unwrap();
         assert_crop_is_rectangle(&t, &[(0, 0), (0, 223), (223, 0), (223, 223), (112, 112)]);
     }
     #[test]
     fn orient_input_center_crop_resizes_short_side_to_256() {
-        let cfg = OrientConfig::rapid_orientation_v2("unused.rten".into());
+        let cfg = OrientConfig::rapid_orientation_v2("unused.rten");
         // The rectangle is exactly the resized crop window in source pixels. A black hole covers the
         // crop that a missing resize would read, so skipping the resize reads black at the inset corners.
         // The checked points are inset by 4 px so the resize filter does not blend the rectangle edge.
@@ -600,7 +600,7 @@ mod tests {
     }
     #[test]
     fn orient_input_tiny_image() {
-        let cfg = OrientConfig::rapid_orientation_v2("unused.rten".into());
+        let cfg = OrientConfig::rapid_orientation_v2("unused.rten");
         assert_eq!(orient_input(&solid(20, 10, 128), &cfg).unwrap().shape(), &[1, 3, 224, 224]);
     }
     #[test]

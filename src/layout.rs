@@ -111,6 +111,7 @@ pub enum LayoutType {
 /// How downstream stages treat a region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RegionRole {
     DocTitle,
     SectionTitle,
@@ -621,7 +622,7 @@ mod tests {
 
     #[test]
     fn layout_config_defaults_follow_inference_yml() {
-        let c = LayoutConfig::default("m.rten".into());
+        let c = LayoutConfig::default("m.rten");
         assert_eq!((c.target_size, c.conf_thresh, c.mean, c.std), (800, 0.5, [0.0; 3], [1.0; 3]));
     }
 

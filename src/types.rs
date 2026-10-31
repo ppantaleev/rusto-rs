@@ -377,7 +377,8 @@ impl OrientConfig {
     /// RapidAI `rapid_orientation` v2 (PaddleClas PP-LCNet_x1_0_doc_ori): resize
     /// short side to 256, centre crop 224x224, ImageNet mean/std. Outputs four
     /// probabilities for the classes 0/90/180/270.
-    pub fn rapid_orientation_v2(model_path: PathBuf) -> Self {
+    pub fn rapid_orientation_v2(model_path: impl Into<PathBuf>) -> Self {
+        let model_path = model_path.into();
         Self {
             orient_image_shape: [3, 224, 224],
             mean: [0.485, 0.456, 0.406],
@@ -482,7 +483,8 @@ pub struct LayoutConfig {
 }
 
 impl LayoutConfig {
-    pub fn default(model_path: PathBuf) -> Self {
+    pub fn default(model_path: impl Into<PathBuf>) -> Self {
+        let model_path = model_path.into();
         Self {
             engine_type: EngineType::OnnxRuntime,
             model_type: ModelType::Mobile,
@@ -497,5 +499,21 @@ impl LayoutConfig {
             target_size: 800,
             engine_cfg: EngineConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orient_and_layout_constructors_accept_str_and_pathbuf() {
+        let a = OrientConfig::rapid_orientation_v2("models/o.rten");
+        let b = OrientConfig::rapid_orientation_v2(PathBuf::from("models/o.rten"));
+        assert_eq!(a.model_path, b.model_path);
+        let a = LayoutConfig::default("models/l.rten");
+        let b = LayoutConfig::default(PathBuf::from("models/l.rten"));
+        assert_eq!(a.model_path, b.model_path);
+        assert_eq!(a.model_path, PathBuf::from("models/l.rten"));
     }
 }

@@ -1,7 +1,6 @@
 use clap::Parser;
 use rusto::{
-    DocPipeline, DocPipelineConfig, LayoutConfig, InitializeConfig, TableDetectorConfig,
-    TableModelType, TableStructureConfig,
+    DocPipeline, DocPipelineConfig, LayoutConfig, InitializeConfig, TableStructureConfig,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -39,29 +38,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ocr_config = InitializeConfig::ppv5(args.det_model, args.rec_model, args.keys_path);
 
     // Configure table recognition if enabled
-    let (table_detector, table_recognizer) = if args.table {
+    let table_recognizer = if args.table {
         let model_dir = args
             .layout_model
             .parent()
             .expect("Layout model path has no parent");
 
-        (
-            Some(TableDetectorConfig {
-                model_path: model_dir.join("rtdetr-wired.onnx"),
-                conf_threshold: 0.5,
-                iou_threshold: 0.5,
-                model_type: TableModelType::Wired,
-            }),
-            Some(TableStructureConfig::slanet_plus(model_dir.join("table_slanetplus.rten"))),
-        )
+        Some(TableStructureConfig::slanet_plus(model_dir.join("table_slanetplus.rten")))
     } else {
-        (None, None)
+        None
     };
 
     let mut config = DocPipelineConfig::new(layout_config, ocr_config);
-    if let Some(d) = table_detector {
-        config = config.with_table_detector(d);
-    }
     if let Some(r) = table_recognizer {
         config = config.with_table_recognizer(r);
     }

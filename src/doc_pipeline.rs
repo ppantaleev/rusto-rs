@@ -49,21 +49,27 @@ impl DocPipelineConfig {
         }
     }
 
+    /// Enables the page orientation stage with this classifier configuration.
     pub fn with_orientation(mut self, orient: OrientConfig) -> Self {
         self.orient = Some(orient);
         self
     }
 
+    /// Sets the minimum confidence (0.0..=1.0) for applying the orientation correction.
     pub fn with_orient_min_confidence(mut self, min_confidence: f32) -> Self {
         self.orient_min_confidence = min_confidence;
         self
     }
 
+    /// Enables table structure recognition on layout `Table` regions.
     pub fn with_table_recognizer(mut self, recognizer: TableStructureConfig) -> Self {
         self.table_recognizer = Some(recognizer);
         self
     }
 
+    /// Stores a table cell detector configuration. The detector is a stub and
+    /// is never run; `DocPipeline::new` only checks that the model path exists.
+    #[deprecated(since = "0.4.0", note = "the cell detector is a stub and is never run")]
     pub fn with_table_detector(mut self, detector: TableDetectorConfig) -> Self {
         self.table_detector = Some(detector);
         self
@@ -77,12 +83,23 @@ fn validate_config(cfg: &DocPipelineConfig) -> Result<(), EngineError> {
             "orient_min_confidence must be within 0..=1".to_string(),
         ));
     }
+    // The cell detector is a stub that is never run, so its model is not
+    // loaded; a configured path must still exist.
+    if let Some(detector) = &cfg.table_detector {
+        if !detector.model_path.exists() {
+            return Err(EngineError::Engine(format!(
+                "table detector model not found: {}",
+                detector.model_path.display()
+            )));
+        }
+    }
     Ok(())
 }
 
 /// A pipeline stage, as reported in [`StageStatus`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Stage {
     Orientation,
     Layout,
@@ -93,6 +110,7 @@ pub enum Stage {
 /// Outcome of one stage.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum StageState {
     Ran { elapsed_ms: f64, items: usize },
     Skipped { reason: String },
@@ -128,10 +146,9 @@ pub struct DocPipeline {
     orient_min_confidence: f32,
     layout: LayoutDetector,
     ocr: RustO,
-    /// Constructed when configured but never run: the table structure model
-    /// runs on the layout `Table` regions (spec section 6.4), so a separate
-    /// table detector has no role yet. The field keeps the model loaded and
-    /// validated so a later strategy can use it.
+    /// Always `None` today: the table structure model runs on the layout
+    /// `Table` regions (spec section 6.4), so a separate cell detector has no
+    /// role and its model is no longer loaded. Kept for API stability.
     _table_detector: Option<TableDetector>,
     table_recognizer: Option<TableStructureRecognizer>,
 }
@@ -359,7 +376,6 @@ impl DocPipeline {
             let orient = config.orient.map(OrientClassifier::new).transpose()?;
             let layout = LayoutDetector::new(config.layout)?;
             let ocr = RustO::initialize(config.ocr)?;
-            let table_detector = config.table_detector.map(TableDetector::new).transpose()?;
             let table_recognizer = config.table_recognizer.map(TableStructureRecognizer::new).transpose()?;
 
             Ok(Self {
@@ -367,7 +383,7 @@ impl DocPipeline {
                 orient_min_confidence: config.orient_min_confidence,
                 layout,
                 ocr,
-                _table_detector: table_detector,
+                _table_detector: None,
                 table_recognizer,
             })
         }
@@ -697,7 +713,7 @@ mod tests {
     use super::*;
 
     fn cfg() -> DocPipelineConfig {
-        DocPipelineConfig::new(LayoutConfig::default("l.rten".into()), InitializeConfig::ppv5("d", "r", "k"))
+        DocPipelineConfig::new(LayoutConfig::default("l.rten"), InitializeConfig::ppv5("d", "r", "k"))
     }
 
     fn reg(index: usize, label: LayoutType, text: &str) -> DocRegion {
@@ -1042,7 +1058,7 @@ mod tests {
         assert_eq!(c.orient_min_confidence, 0.6);
         let c = c
             .with_orient_min_confidence(0.7)
-            .with_orientation(OrientConfig::rapid_orientation_v2("o.rten".into()));
+            .with_orientation(OrientConfig::rapid_orientation_v2("o.rten"));
         assert_eq!(c.orient_min_confidence, 0.7);
         assert!(c.orient.is_some());
     }
@@ -1053,6 +1069,23 @@ mod tests {
             assert!(validate_config(&cfg().with_orient_min_confidence(v)).is_err());
         }
         assert!(validate_config(&cfg().with_orient_min_confidence(1.0)).is_ok());
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn configured_table_detector_path_must_exist_but_is_not_loaded() {
+        use crate::table::{TableDetectorConfig, TableModelType};
+        let det = |p: std::path::PathBuf| TableDetectorConfig {
+            model_path: p,
+            conf_threshold: 0.5,
+            iou_threshold: 0.5,
+            model_type: TableModelType::Wired,
+        };
+        let missing = cfg().with_table_detector(det("/nonexistent/rtdetr.onnx".into()));
+        assert!(validate_config(&missing).is_err());
+        // An existing file that is not a model passes: nothing is loaded.
+        let present = cfg().with_table_detector(det(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")));
+        assert!(validate_config(&present).is_ok());
     }
 
     #[test]

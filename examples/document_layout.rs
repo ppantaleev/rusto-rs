@@ -44,6 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             StageState::Skipped { reason } => eprintln!("{:?}: skipped, {reason}", status.stage),
             StageState::Failed { reason } => eprintln!("{:?}: failed, {reason}", status.stage),
+            _ => eprintln!("{:?}: {:?}", status.stage, status.state),
         }
     }
     Ok(())
