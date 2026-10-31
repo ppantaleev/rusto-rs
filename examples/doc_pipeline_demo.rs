@@ -26,7 +26,7 @@ struct Args {
     #[arg(long, short = 'o')]
     output: Option<PathBuf>,
 
-    /// Enable table recognition (requires the rtdetr and table_slanetplus models in the same dir as layout model)
+    /// Enable table recognition (requires the table_slanetplus model in the same dir as layout model)
     #[arg(long, default_value_t = true)]
     table: bool,
 }

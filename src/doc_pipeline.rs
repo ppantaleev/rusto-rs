@@ -66,14 +66,6 @@ impl DocPipelineConfig {
         self.table_recognizer = Some(recognizer);
         self
     }
-
-    /// Stores a table cell detector configuration. The detector is a stub and
-    /// is never run; `DocPipeline::new` only checks that the model path exists.
-    #[deprecated(since = "0.4.0", note = "the cell detector is a stub and is never run")]
-    pub fn with_table_detector(mut self, detector: TableDetectorConfig) -> Self {
-        self.table_detector = Some(detector);
-        self
-    }
 }
 
 fn validate_config(cfg: &DocPipelineConfig) -> Result<(), EngineError> {
@@ -1072,7 +1064,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn configured_table_detector_path_must_exist_but_is_not_loaded() {
         use crate::table::{TableDetectorConfig, TableModelType};
         let det = |p: std::path::PathBuf| TableDetectorConfig {
@@ -1081,10 +1072,13 @@ mod tests {
             iou_threshold: 0.5,
             model_type: TableModelType::Wired,
         };
-        let missing = cfg().with_table_detector(det("/nonexistent/rtdetr.onnx".into()));
+        // The field is public: it can be assigned on a config built with `new`.
+        let mut missing = cfg();
+        missing.table_detector = Some(det("/nonexistent/rtdetr.onnx".into()));
         assert!(validate_config(&missing).is_err());
         // An existing file that is not a model passes: nothing is loaded.
-        let present = cfg().with_table_detector(det(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")));
+        let mut present = cfg();
+        present.table_detector = Some(det(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")));
         assert!(validate_config(&present).is_ok());
     }
 

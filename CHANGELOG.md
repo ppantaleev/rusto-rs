@@ -36,6 +36,7 @@ Entries by other contributors that landed in the history before this branch and 
 - **api**: `Stage`, `StageState` and `RegionRole` are #[non_exhaustive]; a `match` on them outside the crate needs a `_ =>` arm
 - **api**: `table::BBox` is now the same type as `layout::BBox` (re-exported), so `rotate_box_back` accepts table cell boxes; `layout::BBox` is `Copy + PartialEq + Eq + Serialize`
 - **cli**: `--save-corrected` accepts only `.png`, `.jpg` and `.jpeg` (case-insensitive) and rejects other extensions before models load
+- **doc**: `DocPipelineConfig::table_detector` is kept, but the stub cell detector is never run: `DocPipeline::new` does not load its model and only checks that a configured path exists; `examples/doc_pipeline_demo.rs` no longer needs an rtdetr model
 - **doc**: DocPipelineConfig is #[non_exhaustive]; use DocPipelineConfig::new(layout, ocr) and with_* builders
 - **layout**: LayoutConfig defaults 800 px, mean 0/std 1, conf_thresh 0.5 (was 0.4, unused); LayoutType is #[non_exhaustive]
 - **table**: TableStructureConfig and TableModelType are #[non_exhaustive]; the default config is now SLANet_plus (`models/DocOCR/table_slanetplus.rten`) and the recogniser rejects the SLANeXt model types
@@ -44,9 +45,6 @@ Entries by other contributors that landed in the history before this branch and 
 - **orient**: The model loader selects `.rten`/`.onnx` by extension and rejects other extensions, also for the legacy line classifier
 - **docs**: Added "Document Layout, Tables & Orientation" guide; CLI and orientation guides updated; documentation is English only (`docs/content/id` not updated)
 - **tests**: Ignored timing test `tests/doc_timing_test.rs` (orientation, layout, table structure only, full page)
-
-### Deprecated
-- **doc**: `DocPipelineConfig::with_table_detector` is deprecated since 0.4.0: the cell detector is a stub and is never run. `DocPipeline::new` no longer loads its model and only checks that the configured path exists; `examples/doc_pipeline_demo.rs` no longer needs an rtdetr model
 
 ### Fixed
 - **table**: A quad with a NaN or infinite value no longer produces a cell box (`quad_to_bbox` returns `None`)
