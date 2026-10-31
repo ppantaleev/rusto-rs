@@ -5,33 +5,53 @@ All notable changes to RustO! will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased upstream]
+
+Entries by other contributors that landed in the history before this branch and are not part of the document layout, tables and orientation work. They were removed from 0.4.0 because they do not describe this branch; they are kept here until upstream assigns them to a release.
+
+### Changed
+- **flutter**: Poll asynchronously for OCR completion in example widget test; add inline code documentation (@byrizki)
+
+### Fixed
+- **bindings**: Synchronize UniFFI generated bindings checksums and enhance flutter failure diagnostics (@byrizki)
+- Flutter example ci, pypi release action, dart & flutter pub score, flutter ci release (@byrizki)
+
 ## [0.4.0] - 2026-10-31
 
 ### Added
 - **doc**: scripts/download_doc_models.sh downloads and verifies RapidAI orientation v2, PP-DocLayoutV3 and SLANet_plus models (Apache-2.0)
 - **orient**: OrientConfig::rapid_orientation_v2 (resize-short 256, centre crop 224, ImageNet normalisation), PageOrientation, rotate_box_back
 - **layout**: PP-DocLayoutV3 support (25 labels, [N,7] output, reading order)
-- **table**: SLANet_plus table structure model type (`TableStructureConfig::slanet_plus`, 488 px keep-ratio input `x`, 500 tokens), embedded structure dictionary `SLANET_PLUS_DICT` with ONNX `character` metadata override, `EngineSession::metadata_value`; pre-processing and dictionary translated from bobine 0.7.3 (MIT)
-- **table**: SLANet_plus structure with rowspan/colspan, cell boxes, cell text, unassigned_lines (decoder translated from bobine 0.7.3 rapid_table.rs, MIT)
+- **table**: SLANet_plus table structure model type (`TableStructureConfig::slanet_plus`, 488 px keep-ratio input `x`, 500 tokens), embedded structure dictionary `SLANET_PLUS_DICT` with ONNX `character` metadata override, `EngineSession::metadata_value`; pre-processing and dictionary translated from bobine 0.7.3 `rapid_table.rs` (MIT)
+- **table**: SLANet_plus structure with rowspan/colspan, cell boxes, cell text, unassigned_lines (`argmax_tokens` is translated from bobine's `rapid_table.rs`, MIT; the grid decoder is new code)
 - **doc**: DocPipeline::run_with_image, corrected-page coordinates, per-region OCR, vertical text, stage status; examples/document_layout.rs
 - **cli**: `--enable-layout`, `--layout-model`, `--enable-table`, `--table-model`, `--save-corrected`, `--format document`; `--enable-orient` now runs orientation (plain OCR keeps original-scan coordinates); `--orient-model` requires `--enable-orient` and defaults to `models/DocOCR/orient_rapidai_v2.rten`
 
 ### Changed
+- **doc**: Behaviour change: `DocResult::to_markdown` is a new renderer by layout role: `# ` for `doc_title`, `## ` for `paragraph_title`, `[^n]` footnote definitions after the body, header/footer/number regions under `## Page furniture`, and GFM tables (HTML `<table>` when spans exist). The legacy `blocks` renderer is removed
+- **doc**: Caption rule: a `figure_title` caption is moved behind an image, chart or table only when that block is the immediately preceding body block; otherwise it stays in model reading order
+- **doc**: Breaking (struct literals): `LayoutRegion` gains `reading_order` and `OrientConfig` gains `preprocess`; code that builds them with struct literals must add the fields
+- **layout**: Breaking: layout outputs of shape `[N,6]` (the earlier 10-class decoder with NMS, including PP-DocLayout_plus-L) are no longer accepted; only the PP-DocLayoutV3 `[N,7]` output is decoded. `LayoutDetector::new` of an older model fails with a clear `[N,7]` error
+- **api**: `OrientConfig::rapid_orientation_v2` and `LayoutConfig::default` take `impl Into<PathBuf>`, so a `&str` works; `PathBuf` callers still compile, but a call that passes `"…".into()` now needs the type annotation removed
+- **api**: `Stage`, `StageState` and `RegionRole` are #[non_exhaustive]; a `match` on them outside the crate needs a `_ =>` arm
+- **api**: `table::BBox` is now the same type as `layout::BBox` (re-exported), so `rotate_box_back` accepts table cell boxes; `layout::BBox` is `Copy + PartialEq + Eq + Serialize`
+- **cli**: `--save-corrected` accepts only `.png`, `.jpg` and `.jpeg` (case-insensitive) and rejects other extensions before models load
 - **doc**: DocPipelineConfig is #[non_exhaustive]; use DocPipelineConfig::new(layout, ocr) and with_* builders
 - **layout**: LayoutConfig defaults 800 px, mean 0/std 1, conf_thresh 0.5 (was 0.4, unused); LayoutType is #[non_exhaustive]
 - **table**: TableStructureConfig and TableModelType are #[non_exhaustive]; the default config is now SLANet_plus (`models/DocOCR/table_slanetplus.rten`) and the recogniser rejects the SLANeXt model types
 - **table**: TableCell.bbox is absolute page pixels (percent-of-crop convention removed); TableCell.score added
 - **cli**: Behaviour change: `--orient-model` without `--enable-orient` is now a clap error; `--enable-orient` now runs orientation (before, the flag had no effect); `--layout-model`, `--table-model` and `--save-corrected` also require their enabling flag
 - **orient**: The model loader selects `.rten`/`.onnx` by extension and rejects other extensions, also for the legacy line classifier
-- **flutter**: Poll asynchronously for OCR completion in example widget test; add inline code documentation (@byrizki)
 - **docs**: Added "Document Layout, Tables & Orientation" guide; CLI and orientation guides updated; documentation is English only (`docs/content/id` not updated)
 - **tests**: Ignored timing test `tests/doc_timing_test.rs` (orientation, layout, table structure only, full page)
 
+### Deprecated
+- **doc**: `DocPipelineConfig::with_table_detector` is deprecated since 0.4.0: the cell detector is a stub and is never run. `DocPipeline::new` no longer loads its model and only checks that the configured path exists; `examples/doc_pipeline_demo.rs` no longer needs an rtdetr model
+
 ### Fixed
+- **table**: A quad with a NaN or infinite value no longer produces a cell box (`quad_to_bbox` returns `None`)
 - **table**: Place colspan cells only where the whole span is free
 - **orient**: Do not re-apply softmax to models that already output probabilities
-- **bindings**: Synchronize UniFFI generated bindings checksums and enhance flutter failure diagnostics (@byrizki)
-- Flutter example ci, pypi release action, dart & flutter pub score, flutter ci release (@byrizki)
 
 ### Known limitations
 - Layout, orientation and table stages are unsupported with the `use-opencv` backend. `cargo check --features use-opencv` was not run: not checked, OpenCV not installed on the build machine; CI does not build it
@@ -41,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Table structure is not attempted when OCR of the table crop fails
 
 ### Attribution
-- SLANet_plus pre-processing, structure dictionary handling and token decoding are translated from `bobine` 0.7.3 (`src/rapid_table.rs`, https://github.com/opticsWolf/bobine), used under its MIT option; Copyright (c) 2026 opticsWolf. Notice in the header of `src/table.rs`
+- SLANet_plus pre-processing, structure dictionary handling and `argmax_tokens` are translated from `bobine` 0.7.3 (`src/rapid_table.rs`, https://github.com/opticsWolf/bobine), used under its MIT option; the grid decoder is new code; Copyright (c) 2026 opticsWolf. Notice in the header of `src/table.rs`
 - Models (downloaded by `scripts/download_doc_models.sh`, not bundled): RapidAI orientation v2, PaddlePaddle PP-DocLayoutV3 and SLANet_plus, all Apache-2.0
 
 ### Performance (Apple M5 Pro, release, 1240x1754 page, median of 5 after warm-up)
