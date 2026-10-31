@@ -428,123 +428,115 @@ pub(crate) fn lines_from_ocr(
 }
 
 impl DocResult {
+    /// Markdown of the page, regions in `index` order. Footnotes follow the
+    /// body as `[^n]` definitions, header/footer/number regions come last under
+    /// `## Page furniture`, and a caption moves behind the nearest preceding
+    /// image, chart or table. Empty `regions` give an empty string.
     pub fn to_markdown(&self) -> String {
-        let mut md = String::new();
-        let mut last_was_caption = false;
+        let mut regions: Vec<&DocRegion> = self.regions.iter().collect();
+        regions.sort_by_key(|r| r.index);
 
-        for (idx, block) in self.blocks.iter().enumerate() {
-            if let Some(text) = &block.text {
-                if text.trim().is_empty() {
+        let mut body: Vec<String> = Vec::new();
+        let mut footnotes: Vec<String> = Vec::new();
+        let mut furniture: Vec<String> = Vec::new();
+        // Insert position for captions: just behind the block of the nearest
+        // preceding image, chart or table.
+        let mut anchor: Option<usize> = None;
+
+        for r in regions {
+            let text = r.text.as_deref().map(str::trim).unwrap_or("");
+            let [x0, y0, x1, y1] = [r.bbox.x_min, r.bbox.y_min, r.bbox.x_max, r.bbox.y_max];
+            let block = match r.label.role() {
+                RegionRole::DocTitle => (!text.is_empty()).then(|| format!("# {text}")),
+                RegionRole::SectionTitle => (!text.is_empty()).then(|| format!("## {text}")),
+                RegionRole::Paragraph | RegionRole::VerticalText => {
+                    (!text.is_empty()).then(|| text.to_string())
+                }
+                RegionRole::Footnote => {
+                    if !text.is_empty() {
+                        footnotes.push(format!("[^{}]: {}", footnotes.len() + 1, text));
+                    }
+                    None
+                }
+                RegionRole::Caption => {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let caption = format!("*{text}*");
+                    match anchor {
+                        Some(pos) => {
+                            body.insert(pos, caption);
+                            anchor = Some(pos + 1);
+                        }
+                        None => body.push(caption),
+                    }
                     continue;
                 }
-
-                match block.region.layout_type {
-                    LayoutType::Title => {
-                        // Detect title level based on font size heuristics
-                        // For now, use bbox height as proxy for font size
-                        let height = block.region.bbox.y_max - block.region.bbox.y_min;
-                        let level = if height > 100 {
-                            1 // # Main title
-                        } else if height > 60 {
-                            2 // ## Section
-                        } else {
-                            3 // ### Subsection
-                        };
-                        let prefix = "#".repeat(level);
-                        md.push_str(&format!("{} {}\n\n", prefix, text.trim()));
-                    }
-                    LayoutType::Header => {
-                        // Headers are typically page headers - can be omitted or included
-                        // For RapidDoc compatibility, include them but don't make them prominent
-                        md.push_str(&format!("{}\n\n", text.trim()));
-                    }
-                    LayoutType::Footer => {
-                        // Footers (page numbers, etc.) - typically skipped in content
-                        // but included for completeness
-                        md.push_str(&format!("---\n{}\n\n", text.trim()));
-                    }
-                    LayoutType::FigureCaption => {
-                        // Figure captions should be in italics and on separate line
-                        md.push_str(&format!("*{}*\n\n", text.trim()));
-                        last_was_caption = true;
-                    }
-                    LayoutType::TableCaption => {
-                        // Table captions should be in italics
-                        md.push_str(&format!("*{}*\n\n", text.trim()));
-                        last_was_caption = true;
-                    }
-                    LayoutType::Equation => {
-                        // Equations - treat as regular text for now (LaTeX formatting ignored)
-                        md.push_str(&format!("{}\n\n", text.trim()));
-                    }
-                    LayoutType::Reference => {
-                        // References - keep as plain text but maybe add indicator
-                        md.push_str(&format!("{}\n\n", text.trim()));
-                    }
-                    LayoutType::Text => {
-                        // Check if this looks like a list
-                        if Self::is_list_line(text) {
-                            // Format as markdown list
-                            md.push_str(&format!("{}\n", text.trim()));
-                        } else {
-                            // Regular paragraph
-                            md.push_str(&format!("{}\n\n", text.trim()));
-                            last_was_caption = false;
-                        }
-                    }
-                    _ => {
-                        md.push_str(&format!("{}\n\n", text.trim()));
-                        last_was_caption = false;
-                    }
+                RegionRole::Table => Self::table_block(r, text),
+                RegionRole::Visual => Some(format!("![{}](#region-{})", r.label.name(), r.index)),
+                RegionRole::Formula => {
+                    Some(format!("```formula\nregion-{} [{x0},{y0},{x1},{y1}]\n```", r.index))
                 }
-            } else {
-                // Blocks without text (figures, tables)
-                match block.region.layout_type {
-                    LayoutType::Figure => {
-                        // Check if next block is a figure caption
-                        let has_caption = idx + 1 < self.blocks.len() 
-                            && matches!(self.blocks[idx + 1].region.layout_type, LayoutType::FigureCaption);
-                        
-                        if !has_caption && !last_was_caption {
-                            // No caption, show placeholder
-                            md.push_str("![Figure]\n\n");
-                        } else if !last_was_caption {
-                            // Caption comes after, just show image
-                            md.push_str("![Figure]\n");
-                        }
-                        // If caption was before, it's already added
-                        last_was_caption = false;
-                    }
-                    LayoutType::Table => {
-                        // Check if we have HTML table markup (from table recognition)
-                        if let Some(html) = &block.html {
-                            // Insert HTML table directly (RapidDoc style)
-                            md.push_str(&format!("\n{}\n\n", html));
-                        } else {
-                            // No table recognition - show placeholder
-                            md.push_str("| Table | (Structure recognition not yet implemented) |\n");
-                            md.push_str("|-------|---------------------------------------------|\n\n");
-                        }
-                        last_was_caption = false;
-                    }
-                    _ => {}
+                RegionRole::Algorithm => {
+                    Some(format!("```algorithm\nregion-{} [{x0},{y0},{x1},{y1}]\n```", r.index))
                 }
+                RegionRole::FurnitureText => {
+                    if !text.is_empty() {
+                        furniture.push(format!("- {}: {}", r.label.name(), text));
+                    }
+                    None
+                }
+                RegionRole::FurnitureImage => {
+                    furniture.push(format!(
+                        "- {}: ![{}](#region-{})",
+                        r.label.name(),
+                        r.label.name(),
+                        r.index
+                    ));
+                    None
+                }
+            };
+            let is_anchor = matches!(r.label, LayoutType::Image | LayoutType::Chart | LayoutType::Table);
+            if let Some(b) = block {
+                body.push(b);
+                if is_anchor {
+                    anchor = Some(body.len());
+                }
+            } else if is_anchor {
+                anchor = None;
             }
         }
 
+        if !footnotes.is_empty() {
+            body.push(footnotes.join("\n"));
+        }
+        if !furniture.is_empty() {
+            body.push(format!("## Page furniture\n\n{}", furniture.join("\n")));
+        }
+        if body.is_empty() {
+            return String::new();
+        }
+        let mut md = body.join("\n\n");
+        md.push('\n');
         md
     }
 
-    /// Detect if a line looks like a list item
-    fn is_list_line(text: &str) -> bool {
-        let trimmed = text.trim();
-        // Check for common list patterns
-        trimmed.starts_with("- ")
-            || trimmed.starts_with("* ")
-            || trimmed.starts_with("• ")
-            || (trimmed.len() > 2 
-                && trimmed.chars().next().unwrap().is_ascii_digit()
-                && (trimmed.chars().nth(1) == Some('.') || trimmed.chars().nth(1) == Some(')')))
+    fn table_block(r: &DocRegion, text: &str) -> Option<String> {
+        if let Some(t) = &r.table {
+            if t.rows.iter().any(|row| !row.cells.is_empty()) {
+                return Some(if t.has_spans() {
+                    t.to_html()
+                } else {
+                    t.to_markdown().trim_end_matches('\n').to_string()
+                });
+            }
+            let lines: Vec<&str> =
+                t.unassigned_lines.iter().map(|l| l.text.trim()).filter(|s| !s.is_empty()).collect();
+            if !lines.is_empty() {
+                return Some(lines.join(" "));
+            }
+        }
+        (!text.is_empty()).then(|| text.to_string())
     }
 }
 
@@ -554,6 +546,104 @@ mod tests {
 
     fn cfg() -> DocPipelineConfig {
         DocPipelineConfig::new(LayoutConfig::default("l.rten".into()), InitializeConfig::ppv5("d", "r", "k"))
+    }
+
+    fn reg(index: usize, label: LayoutType, text: &str) -> DocRegion {
+        DocRegion {
+            index,
+            label,
+            bbox: BBox { x_min: 1, y_min: 2, x_max: 3, y_max: 4 },
+            score: 0.9,
+            text: Some(text.to_string()),
+            lines: vec![],
+            table: None,
+        }
+    }
+
+    fn result(regions: Vec<DocRegion>) -> DocResult {
+        DocResult { width: 10, height: 20, orientation: None, regions, stages: vec![], blocks: vec![] }
+    }
+
+    fn text_line(t: &str) -> TextResult {
+        let pts = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        TextResult { text: t.to_string(), score: 1.0, frame: Frame::from_points(&pts), box_points: pts }
+    }
+
+    fn grid(col_span: usize) -> TableStructure {
+        use crate::table::{TableCell, TableRow};
+        let cell = |row: usize, col: usize, span: usize| TableCell {
+            bbox: crate::table::BBox { x_min: 0, y_min: 0, x_max: 1, y_max: 1 },
+            row,
+            col,
+            row_span: 1,
+            col_span: span,
+            text: format!("{row}{col}"),
+            score: 1.0,
+        };
+        let first = if col_span > 1 { vec![cell(0, 0, col_span)] } else { vec![cell(0, 0, 1), cell(0, 1, 1)] };
+        TableStructure {
+            rows: vec![TableRow { cells: first }, TableRow { cells: vec![cell(1, 0, 1), cell(1, 1, 1)] }],
+            num_rows: 2,
+            num_cols: 2,
+            unassigned_lines: vec![],
+        }
+    }
+
+    #[test]
+    fn markdown_of_empty_result_is_empty() { assert_eq!(result(vec![]).to_markdown(), ""); }
+    #[test]
+    fn markdown_headings_and_paragraphs() {
+        let r = result(vec![reg(0, LayoutType::DocTitle, "Заглавие"), reg(1, LayoutType::ParagraphTitle, "Раздел"), reg(2, LayoutType::Text, "Абзац.")]);
+        assert_eq!(r.to_markdown(), "# Заглавие\n\n## Раздел\n\nАбзац.\n");
+    }
+    #[test]
+    fn caption_moves_after_nearest_preceding_visual() {
+        let r = result(vec![reg(0, LayoutType::Image, ""), reg(1, LayoutType::Text, "т"), reg(2, LayoutType::FigureTitle, "Фиг. 1")]);
+        assert_eq!(r.to_markdown(), "![image](#region-0)\n\n*Фиг. 1*\n\nт\n");
+    }
+    #[test]
+    fn caption_without_preceding_visual_stays_in_place() {
+        let r = result(vec![reg(0, LayoutType::FigureTitle, "Фиг. 1"), reg(1, LayoutType::Image, "")]);
+        assert_eq!(r.to_markdown(), "*Фиг. 1*\n\n![image](#region-1)\n");
+    }
+    #[test]
+    fn footnotes_and_page_furniture_go_last() {
+        let r = result(vec![reg(0, LayoutType::Header, "Горен"), reg(1, LayoutType::Text, "Тяло"), reg(2, LayoutType::Footnote, "Бележка"), reg(3, LayoutType::Number, "3")]);
+        assert_eq!(r.to_markdown(), "Тяло\n\n[^1]: Бележка\n\n## Page furniture\n\n- header: Горен\n- number: 3\n");
+    }
+    #[test]
+    fn formula_block_references_region() {
+        assert_eq!(result(vec![reg(4, LayoutType::DisplayFormula, "")]).to_markdown(), "```formula\nregion-4 [1,2,3,4]\n```\n");
+    }
+    #[test]
+    fn table_with_span_renders_html_without_span_gfm() {
+        let mut r = result(vec![reg(0, LayoutType::Table, "")]);
+        r.regions[0].table = Some(grid(2));
+        let md = r.to_markdown();
+        assert!(md.starts_with("<table>") && md.contains("colspan=\"2\""), "{md}");
+        r.regions[0].table = Some(grid(1));
+        assert!(r.to_markdown().starts_with("| "));
+    }
+    #[test]
+    fn table_without_cells_renders_unassigned_text() {
+        let mut r = result(vec![reg(0, LayoutType::Table, "")]);
+        r.regions[0].table = Some(TableStructure { rows: vec![], num_rows: 0, num_cols: 0, unassigned_lines: vec![text_line("а"), text_line("б")] });
+        assert_eq!(r.to_markdown(), "а б\n");
+    }
+    #[test]
+    fn markdown_skips_blank_text_and_handles_missing_text() {
+        let mut none = reg(0, LayoutType::Text, "");
+        none.text = None;
+        let r = result(vec![none, reg(1, LayoutType::Text, "  "), reg(2, LayoutType::Footnote, " "), reg(3, LayoutType::Header, ""), reg(4, LayoutType::Table, "")]);
+        assert_eq!(r.to_markdown(), "");
+    }
+    #[test]
+    fn footnotes_are_numbered_in_reading_order_and_furniture_images_listed() {
+        let r = result(vec![reg(0, LayoutType::Footnote, "а"), reg(1, LayoutType::Algorithm, ""), reg(2, LayoutType::VisionFootnote, "б"), reg(3, LayoutType::HeaderImage, "")]);
+        assert_eq!(
+            r.to_markdown(),
+            "```algorithm\nregion-1 [1,2,3,4]\n```\n\n[^1]: а\n[^2]: б\n\n## Page furniture\n\n- header_image: ![header_image](#region-3)\n"
+        );
     }
 
     #[test]
