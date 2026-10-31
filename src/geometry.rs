@@ -102,6 +102,46 @@ fn get_padding_h(h: i32, w: i32, width_height_ratio: f32, min_height: f32) -> i3
     (new_h - h).abs() / 2
 }
 
+/// True when `get_rotate_crop_image` would produce an image with no pixels:
+/// the longer opposite edge in either direction is shorter than 1 px (the crop
+/// size is truncated to whole pixels), or a coordinate is not finite. Detection
+/// boxes are clamped to the page, so a box lying outside it collapses onto the
+/// edge as a zero-height or zero-width quad.
+pub fn is_degenerate_quad(points: &[Point2f; 4]) -> bool {
+    if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
+        return true;
+    }
+    let w = (points[0].x - points[1].x)
+        .hypot(points[0].y - points[1].y)
+        .max((points[2].x - points[3].x).hypot(points[2].y - points[3].y));
+    let h = (points[0].x - points[3].x)
+        .hypot(points[0].y - points[3].y)
+        .max((points[1].x - points[2].x).hypot(points[1].y - points[2].y));
+    w < 1.0 || h < 1.0
+}
+
+/// An image with no pixels. The recogniser maps it to an empty line.
+fn empty_crop() -> ImgResult<Mat> {
+    #[cfg(feature = "use-opencv")]
+    {
+        Ok(Mat::default())
+    }
+    #[cfg(not(feature = "use-opencv"))]
+    {
+        Mat::from_rgb8(0, 0, Vec::new())
+    }
+}
+
+/// Crop one detected text box. A degenerate box gives an empty image instead of
+/// an error, so one bad box cannot fail the recognition of the whole image and
+/// the result list stays aligned with the detection boxes.
+pub fn crop_text_box(img: &Mat, points: &[Point2f; 4]) -> ImgResult<Mat> {
+    if is_degenerate_quad(points) {
+        return empty_crop();
+    }
+    get_rotate_crop_image(img, points)
+}
+
 #[cfg(feature = "use-opencv")]
 pub fn get_rotate_crop_image(img: &Mat, points: &[Point2f; 4]) -> ImgResult<Mat> {
     let w1 = (points[0].x - points[1].x).hypot(points[0].y - points[1].y);
@@ -436,4 +476,53 @@ pub fn nms(boxes: &[[f32; 6]], iou_same: f32, iou_diff: f32) -> Vec<usize> {
     }
 
     selected_indices
+}
+
+#[cfg(all(test, not(feature = "use-opencv")))]
+mod degenerate_box_tests {
+    use super::*;
+
+    fn quad(x0: f32, y0: f32, x1: f32, y1: f32) -> [Point2f; 4] {
+        [
+            Point2f::new(x0, y0),
+            Point2f::new(x1, y0),
+            Point2f::new(x1, y1),
+            Point2f::new(x0, y1),
+        ]
+    }
+
+    fn page() -> Mat {
+        Mat::from_rgb8(100, 40, vec![200; 100 * 40 * 3]).unwrap()
+    }
+
+    #[test]
+    fn flat_and_sub_pixel_and_non_finite_quads_are_degenerate() {
+        assert!(is_degenerate_quad(&quad(10.0, 40.0, 54.0, 40.0)), "zero height");
+        assert!(is_degenerate_quad(&quad(10.0, 5.0, 10.0, 30.0)), "zero width");
+        assert!(is_degenerate_quad(&quad(10.0, 5.0, 10.9, 30.0)), "width < 1 px");
+        assert!(is_degenerate_quad(&quad(10.0, 5.0, 40.0, 5.5)), "height < 1 px");
+        assert!(is_degenerate_quad(&quad(f32::NAN, 5.0, 40.0, 20.0)), "non-finite");
+        assert!(!is_degenerate_quad(&quad(10.0, 5.0, 54.0, 20.0)));
+        assert!(!is_degenerate_quad(&quad(10.0, 5.0, 11.0, 6.0)), "exactly 1 px is kept");
+    }
+
+    #[test]
+    fn crop_of_degenerate_box_is_an_empty_image_not_an_error() {
+        let img = page();
+        let crop = crop_text_box(&img, &quad(10.0, 40.0, 54.0, 40.0)).expect("no error");
+        assert!(crop.rows() <= 0 || crop.cols() <= 0);
+        let collapsed = [Point2f::new(7.0, 7.0); 4];
+        let crop = crop_text_box(&img, &collapsed).expect("fully collapsed quad: no error");
+        assert!(crop.rows() <= 0 || crop.cols() <= 0);
+    }
+
+    #[test]
+    fn crop_of_valid_box_is_unchanged() {
+        let img = page();
+        let b = quad(10.0, 5.0, 54.0, 20.0);
+        let crop = crop_text_box(&img, &b).unwrap();
+        let direct = get_rotate_crop_image(&img, &b).unwrap();
+        assert_eq!((crop.cols(), crop.rows()), (direct.cols(), direct.rows()));
+        assert_eq!((crop.cols(), crop.rows()), (44, 15));
+    }
 }

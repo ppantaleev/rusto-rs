@@ -320,10 +320,15 @@ impl TextRecognizer {
             width_list.push(w as f32 / h.max(1) as f32);
         }
 
-        let mut indices: Vec<usize> = (0..img_list.len()).collect();
+        // A crop with no pixels (e.g. a detection box collapsed onto the image edge)
+        // has nothing to recognise: it keeps its slot with an empty result.
+        let mut indices: Vec<usize> = (0..img_list.len())
+            .filter(|&i| img_list[i].rows() > 0 && img_list[i].cols() > 0)
+            .collect();
         indices.sort_by(|&a, &b| width_list[a].partial_cmp(&width_list[b]).unwrap_or(std::cmp::Ordering::Equal));
 
         let img_num = img_list.len();
+        let valid_num = indices.len();
         let batch_num = self.cfg.rec_batch_num as usize;
 
         let mut all_texts: Vec<(String, f32)> = vec![(String::new(), 0.0); img_num];
@@ -336,8 +341,8 @@ impl TextRecognizer {
         );
 
         let mut beg = 0usize;
-        while beg < img_num {
-            let end = (beg + batch_num).min(img_num);
+        while beg < valid_num {
+            let end = (beg + batch_num).min(valid_num);
 
             let mut max_wh_ratio = img_w as f32 / img_h as f32;
             let mut wh_ratio_list: Vec<f32> = Vec::with_capacity(end - beg);
@@ -539,4 +544,94 @@ fn has_chinese_char(text: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(all(test, not(feature = "use-opencv")))]
+mod degenerate_crop_tests {
+    use super::*;
+    use ndarray::{Array3, ArrayD};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    /// Fake recogniser model. The character list is `["a", "b"]`; a row whose first
+    /// normalised pixel is above zero (white crop) decodes to "b", otherwise to "a".
+    /// It records the batch size of every call.
+    struct FakeRec {
+        batches: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl InferenceSession for FakeRec {
+        fn run(&mut self, input: ArrayD<f32>) -> Result<ArrayD<f32>, EngineError> {
+            let n = input.shape()[0];
+            self.batches.lock().unwrap().push(n);
+            let mut out = Array3::<f32>::zeros((n, 2, 4));
+            for i in 0..n {
+                let class = if input[[i, 0, 0, 0]] > 0.0 { 2 } else { 1 };
+                for t in 0..2 {
+                    out[[i, t, class]] = 1.0;
+                }
+            }
+            Ok(out.into_dyn())
+        }
+
+        fn run_all(&mut self, _: ArrayD<f32>) -> Result<HashMap<String, ArrayD<f32>>, EngineError> {
+            unreachable!()
+        }
+
+        fn run_with_inputs(
+            &mut self,
+            _: HashMap<String, ArrayD<f32>>,
+        ) -> Result<HashMap<String, ArrayD<f32>>, EngineError> {
+            unreachable!()
+        }
+
+        fn get_character_list(&self, _: &str) -> Option<Vec<String>> {
+            Some(vec!["a".into(), "b".into()])
+        }
+
+        fn have_key(&self, key: &str) -> bool {
+            key == "character"
+        }
+    }
+
+    fn recogniser() -> (TextRecognizer, Arc<Mutex<Vec<usize>>>) {
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let cfg = RecConfig::ppv6(std::path::PathBuf::new());
+        let rec = TextRecognizer::with_custom_session(cfg, FakeRec { batches: batches.clone() }).unwrap();
+        (rec, batches)
+    }
+
+    fn solid(w: u32, h: u32, v: u8) -> Mat {
+        Mat::from_rgb8(w, h, vec![v; (w * h * 3) as usize]).unwrap()
+    }
+
+    #[test]
+    fn zero_height_crop_yields_empty_line_not_error() {
+        let (mut rec, batches) = recogniser();
+        let out = rec.run(&[solid(44, 0, 0)], false).expect("degenerate crop must not be an error");
+        assert_eq!(out.txts, vec![String::new()]);
+        assert_eq!(out.scores, vec![0.0]);
+        assert!(batches.lock().unwrap().is_empty(), "the model must not be fed a degenerate crop");
+    }
+
+    #[test]
+    fn zero_width_crop_yields_empty_line_with_word_boxes() {
+        let (mut rec, _) = recogniser();
+        let out = rec.run(&[solid(0, 20, 0)], true).unwrap();
+        assert_eq!(out.txts, vec![String::new()]);
+        assert_eq!(out.word_infos.len(), 1);
+        assert!(out.word_infos[0].is_none());
+    }
+
+    #[test]
+    fn degenerate_box_in_a_batch_keeps_results_aligned() {
+        let (mut rec, batches) = recogniser();
+        let imgs = [solid(64, 16, 255), solid(44, 0, 0), solid(32, 16, 0)];
+        let out = rec.run(&imgs, false).unwrap();
+        assert_eq!(out.txts, vec!["b".to_string(), String::new(), "a".to_string()]);
+        assert_eq!(out.scores.len(), 3);
+        assert_eq!(out.scores[1], 0.0);
+        assert!(out.scores[0] > 0.0 && out.scores[2] > 0.0);
+        assert_eq!(*batches.lock().unwrap(), vec![2], "only the two valid crops are inferred");
+    }
 }

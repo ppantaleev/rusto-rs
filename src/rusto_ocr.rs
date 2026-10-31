@@ -17,7 +17,7 @@ use crate::config::InitializeConfig;
 use crate::det::TextDetector;
 use crate::engine::{EngineError, InferenceSession};
 use crate::geometry::{
-    apply_vertical_padding, get_rotate_crop_image, map_boxes_to_original,
+    apply_vertical_padding, crop_text_box, map_boxes_to_original,
     resize_image_within_bounds, OpRecord,
 };
 use crate::orient::{OrientClassifier, Orientation};
@@ -593,7 +593,7 @@ impl RustO {
             } else {
                 *b
             };
-            let crop = get_rotate_crop_image(&working_img, &crop_box)?;
+            let crop = crop_text_box(&working_img, &crop_box)?;
             crop_imgs.push(crop);
         }
 
@@ -601,6 +601,9 @@ impl RustO {
         if global.use_cls && self.cls.is_some() {
             if let Some(cls_classifier) = &mut self.cls {
                 for crop in &mut crop_imgs {
+                    if crop.rows() <= 0 || crop.cols() <= 0 {
+                        continue;
+                    }
                     if let Ok(cls_result) = cls_classifier.classify(crop) {
                         if cls_result.orientation == Orientation::Rotate180
                             && cls_result.confidence >= cls_classifier.config.confidence_threshold
