@@ -35,6 +35,8 @@ Entries by other contributors that landed in the history before this branch and 
 - **api**: `OrientConfig::rapid_orientation_v2` and `LayoutConfig::default` take `impl Into<PathBuf>`, so a `&str` works; `PathBuf` callers still compile, but a call that passes `"…".into()` now needs the type annotation removed
 - **api**: `DocStage`, `StageState` and `RegionRole` are #[non_exhaustive]; a `match` on them outside the crate needs a `_ =>` arm
 - **api**: `table::BBox` is now the same type as `layout::BBox` (re-exported), so `rotate_box_back` accepts table cell boxes; `layout::BBox` is `Copy + PartialEq + Eq + Serialize`
+- **cli**: A document or markdown run that finishes with a `Failed` stage writes `warning: stage <name> failed: <reason>` to stderr for each one and exits with code 3; the output on stdout is complete. Exit codes are listed in `--help`
+- **doc**: `DocResult::orientation_failed()` returns the failure reason of a `Failed` orientation stage; `DocResult::orientation` is `None` both when the stage was skipped and when it failed
 - **cli**: `--save-corrected` accepts only `.png`, `.jpg` and `.jpeg` (case-insensitive) and rejects other extensions before models load
 - **doc**: `DocPipelineConfig::table_detector` is kept, but the stub cell detector is never run: `DocPipeline::new` does not load its model and only checks that a configured path exists; `examples/doc_pipeline_demo.rs` no longer needs an rtdetr model
 - **doc**: DocPipelineConfig is #[non_exhaustive]; use DocPipelineConfig::new(layout, ocr) and with_* builders
@@ -47,6 +49,7 @@ Entries by other contributors that landed in the history before this branch and 
 - **tests**: Ignored timing test `tests/doc_timing_test.rs` (orientation, layout, table structure only, full page)
 
 ### Fixed
+- **ocr**: A detection box that collapses to zero width or height (a box outside the page, clamped onto its edge) no longer fails the recognition of the whole image with `invalid image size`; its line is empty and the other lines are kept. In the document pipeline this had set the OCR stage to `Failed` and dropped all text of the region
 - **table**: A quad with a NaN or infinite value no longer produces a cell box (`quad_to_bbox` returns `None`)
 - **table**: Place colspan cells only where the whole span is free
 - **orient**: Do not re-apply softmax to models that already output probabilities
