@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use rusto::image_impl::Mat;
-use rusto::{decide_orientation, LayoutConfig, LayoutDetector, LayoutType, OrientClassifier, OrientConfig, RegionRole};
+use rusto::{decide_orientation, LayoutConfig, LayoutDetector, LayoutType, OrientClassifier, OrientConfig, RegionRole, TableStructureConfig, TableStructureRecognizer};
 
 fn fixture(name: &str) -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/doc").join(name)
@@ -46,4 +46,22 @@ fn layout_finds_title_paragraphs_table_in_order() {
     let t = body.iter().position(|r| r.layout_type == LayoutType::Table).expect("table region");
     assert!(body[1..t].iter().filter(|r| r.layout_type == LayoutType::Text).count() >= 2);
     assert!(iou(&body[t].bbox, &truth["table"]) >= 0.8);
+}
+
+#[test]
+#[ignore = "requires models/DocOCR (scripts/download_doc_models.sh)"]
+fn table_fixture_has_3x4_grid_with_one_merged_cell() {
+    let truth: serde_json::Value = serde_json::from_slice(&std::fs::read(fixture("table_3x4_merged.json")).unwrap()).unwrap();
+    let crop = rusto::image_impl::imread(fixture("table_3x4_merged.png")).unwrap();
+    // A directory holding only the ONNX export exercises the metadata dictionary path.
+    let rten = doc_model("table_slanetplus.rten");
+    let model = if rten.exists() { rten } else { doc_model("table_slanetplus.onnx") };
+    let mut rec = TableStructureRecognizer::new(TableStructureConfig::slanet_plus(model)).unwrap();
+    let s = rec.recognize(&crop).unwrap();
+    assert_eq!((s.num_rows, s.num_cols), (3, 4));
+    let spans: Vec<_> = s.rows.iter().flat_map(|r| &r.cells).filter(|c| c.col_span > 1 || c.row_span > 1).collect();
+    assert_eq!(spans.len(), 1);
+    assert_eq!((spans[0].row, spans[0].col, spans[0].col_span), (0, 0, truth["merged"]["col_span"].as_u64().unwrap() as usize));
+    let (w, h) = (truth["width"].as_i64().unwrap() as i32, truth["height"].as_i64().unwrap() as i32);
+    assert!(s.rows.iter().flat_map(|r| &r.cells).all(|c| c.bbox.x_max <= w && c.bbox.y_max <= h && c.bbox.x_max > c.bbox.x_min));
 }

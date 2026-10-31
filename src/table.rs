@@ -29,7 +29,9 @@
 //! SOFTWARE.
 
 use crate::engine::{load_stage_session, EngineError, EngineSession, InferenceSession};
+use crate::table_decode::{argmax_tokens, build_structure, decode_structure_tokens};
 use crate::types::EngineConfig;
+use crate::TextResult;
 use ndarray::{Array2, Array3, Array4, ArrayD, Axis};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -52,12 +54,16 @@ pub struct BBox {
 /// Table cell information
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TableCell {
+    /// Cell box in absolute page pixels. A cell without a usable location has
+    /// a degenerate (zero-area) box at the crop origin and never receives text.
     pub bbox: BBox,
     pub row: usize,
     pub col: usize,
     pub row_span: usize,
     pub col_span: usize,
     pub text: String,
+    /// Probability of the structure token that opened the cell (0.0..=1.0).
+    pub score: f32,
 }
 
 /// Table row
@@ -72,6 +78,8 @@ pub struct TableStructure {
     pub rows: Vec<TableRow>,
     pub num_rows: usize,
     pub num_cols: usize,
+    /// OCR lines inside the table crop that no cell received.
+    pub unassigned_lines: Vec<TextResult>,
 }
 
 impl TableStructure {
@@ -109,39 +117,40 @@ impl TableStructure {
         html
     }
 
-    /// Generate markdown table from structure (simpler format, no spans)
+    /// True when any cell spans more than one row or column.
+    pub fn has_spans(&self) -> bool {
+        self.rows.iter().flat_map(|r| &r.cells).any(|c| c.row_span > 1 || c.col_span > 1)
+    }
+
+    /// Generate a GitHub-flavoured markdown table. Markdown has no spans, so a
+    /// cell is written at its own column and the positions it covers stay
+    /// empty. Every row has exactly `num_cols` cells; `|` in text is escaped as
+    /// `\|` and line breaks become spaces. The first row is the header.
     pub fn to_markdown(&self) -> String {
-        if self.rows.is_empty() {
+        if self.rows.is_empty() || self.num_cols == 0 {
             return String::new();
         }
-
         let mut md = String::new();
-
-        // Header row
-        if let Some(first_row) = self.rows.first() {
-            md.push_str("| ");
-            for cell in &first_row.cells {
-                md.push_str(&format!("{} | ", cell.text.trim()));
-            }
-            md.push('\n');
-
-            // Separator
-            md.push('|');
-            for _ in &first_row.cells {
-                md.push_str("---|");
-            }
-            md.push('\n');
-        }
-
-        // Data rows
-        for row in self.rows.iter().skip(1) {
-            md.push_str("| ");
+        for (i, row) in self.rows.iter().enumerate() {
+            let mut texts = vec![String::new(); self.num_cols];
             for cell in &row.cells {
-                md.push_str(&format!("{} | ", cell.text.trim()));
+                if let Some(slot) = texts.get_mut(cell.col) {
+                    *slot = cell
+                        .text
+                        .trim()
+                        .replace(['\r', '\n'], " ")
+                        .replace('|', "\\|");
+                }
             }
-            md.push('\n');
+            md.push_str("| ");
+            md.push_str(&texts.join(" | "));
+            md.push_str(" |\n");
+            if i == 0 {
+                md.push('|');
+                md.push_str(&"---|".repeat(self.num_cols));
+                md.push('\n');
+            }
         }
-
         md
     }
 }
@@ -479,8 +488,6 @@ pub(crate) fn table_input(crop: &Mat, input_size: u32) -> Result<(ArrayD<f32>, f
 /// RapidAI model, `fetch_name_*` in the Paddle one), so the heads are matched by
 /// their last dimension: `num_classes` for the structure logits, 8 for the cell
 /// location (four corner points). Returns `(structure [T, num_classes], loc [T, 8])`.
-// Consumed by the structure decoder.
-#[allow(dead_code)]
 pub(crate) fn split_table_outputs(
     outputs: HashMap<String, ArrayD<f32>>,
     num_classes: usize,
@@ -555,46 +562,35 @@ impl TableStructureRecognizer {
     }
 
     /// Class-index to token table (`sos`, dictionary, `eos`).
-    // Consumed by the structure decoder.
-    #[allow(dead_code)]
     pub(crate) fn charset(&self) -> &[String] {
         &self.charset
     }
 
-    /// Recognize table structure from image
-    /// Returns a grid structure that can be filled with OCR text
+    /// Recognize the structure of a table image; cell boxes are in the pixels
+    /// of `img`. Equivalent to `recognize_at(img, 0, 0)`.
     pub fn recognize(&mut self, img: &Mat) -> Result<TableStructure, EngineError> {
-        let (input_tensor, _ratio) = table_input(img, self.config.input_size)?;
+        self.recognize_at(img, 0, 0)
+    }
+
+    /// Recognize the structure of a table crop whose top-left corner is at
+    /// `(origin_x, origin_y)` on the page. Cell boxes are absolute page pixels.
+    /// The cells carry no text; assign OCR lines with
+    /// `table_decode::assign_lines_to_cells`.
+    pub fn recognize_at(&mut self, crop: &Mat, origin_x: i32, origin_y: i32) -> Result<TableStructure, EngineError> {
+        let (input_tensor, _ratio) = table_input(crop, self.config.input_size)?;
+        let size = crop.size().map_err(|e| EngineError::Preprocess(e.to_string()))?;
+        let (crop_w, crop_h) = (size.width.max(0) as u32, size.height.max(0) as u32);
 
         let mut inputs = HashMap::new();
         inputs.insert("x".to_string(), input_tensor);
-
         let outputs = self.session.run_with_inputs(inputs)?;
 
-        // Postprocess: parse structure tokens
-        self.postprocess(outputs, img)
-    }
-
-    fn postprocess(&self, _outputs: HashMap<String, ArrayD<f32>>, _img: &Mat) -> Result<TableStructure, EngineError> {
-        // SLANet outputs structure tokens that need to be decoded
-        // This requires understanding the specific model output format
-        // For now, return a simple 1x1 structure as placeholder
-        
-        // Create a simple single-cell structure
-        let cell = TableCell {
-            bbox: BBox { x_min: 0, y_min: 0, x_max: 100, y_max: 100 },
-            row: 0,
-            col: 0,
-            row_span: 1,
-            col_span: 1,
-            text: String::new(), // Will be filled by OCR
-        };
-        
-        Ok(TableStructure {
-            rows: vec![TableRow { cells: vec![cell] }],
-            num_rows: 1,
-            num_cols: 1,
-        })
+        let (structure, loc) = split_table_outputs(outputs, self.charset().len())?;
+        let tokens = argmax_tokens(structure.view(), self.charset(), self.config.max_tokens);
+        // One entry per step token, unfiltered, so `token_index` addresses `tokens`.
+        let texts: Vec<&str> = tokens.iter().map(|t| t.token.as_str()).collect();
+        let grid = decode_structure_tokens(&texts);
+        Ok(build_structure(&grid, &tokens, loc.view(), crop_w, crop_h, (origin_x, origin_y)))
     }
 }
 
@@ -776,6 +772,57 @@ mod tests {
         assert_eq!((count("<tr>"), count("<td></td>")), (5, 30));
     }
 
+    fn md_cell(r: usize, c: usize, text: &str) -> TableCell {
+        TableCell {
+            bbox: BBox { x_min: 0, y_min: 0, x_max: 0, y_max: 0 },
+            row: r,
+            col: c,
+            row_span: 1,
+            col_span: 1,
+            text: text.into(),
+            score: 1.0,
+        }
+    }
+
+    #[test]
+    fn markdown_pads_rows_and_escapes_pipes() {
+        let s = TableStructure {
+            num_rows: 2,
+            num_cols: 3,
+            unassigned_lines: vec![],
+            rows: vec![
+                TableRow { cells: vec![md_cell(0, 0, "а"), md_cell(0, 1, "б"), md_cell(0, 2, "в")] },
+                TableRow { cells: vec![md_cell(1, 0, "x | y"), md_cell(1, 1, "z")] },
+            ],
+        };
+        assert_eq!(s.to_markdown(), "| а | б | в |\n|---|---|---|\n| x \\| y | z |  |\n");
+        assert!(!s.has_spans());
+    }
+
+    #[test]
+    fn markdown_places_cells_by_column_and_flattens_newlines() {
+        // A colspan-2 cell at col 0 leaves col 1 empty; the second row's only cell is at col 2.
+        let mut wide = md_cell(0, 0, "шир\nока");
+        wide.col_span = 2;
+        let s = TableStructure {
+            num_rows: 2,
+            num_cols: 3,
+            unassigned_lines: vec![],
+            rows: vec![
+                TableRow { cells: vec![wide, md_cell(0, 2, "в")] },
+                TableRow { cells: vec![md_cell(1, 2, "г")] },
+            ],
+        };
+        assert_eq!(s.to_markdown(), "| шир ока |  | в |\n|---|---|---|\n|  |  | г |\n");
+        assert!(s.has_spans());
+    }
+
+    #[test]
+    fn markdown_of_empty_structure_is_empty() {
+        let s = TableStructure { rows: vec![], num_rows: 0, num_cols: 0, unassigned_lines: vec![] };
+        assert_eq!(s.to_markdown(), "");
+    }
+
     #[test]
     fn test_html_generation() {
         let structure = TableStructure {
@@ -789,6 +836,7 @@ mod tests {
                             row_span: 1,
                             col_span: 1,
                             text: "Header 1".to_string(),
+                            score: 1.0,
                         },
                         TableCell {
                             bbox: BBox { x_min: 100, y_min: 0, x_max: 200, y_max: 30 },
@@ -797,6 +845,7 @@ mod tests {
                             row_span: 1,
                             col_span: 1,
                             text: "Header 2".to_string(),
+                            score: 1.0,
                         },
                     ],
                 },
@@ -809,6 +858,7 @@ mod tests {
                             row_span: 1,
                             col_span: 1,
                             text: "Data 1".to_string(),
+                            score: 1.0,
                         },
                         TableCell {
                             bbox: BBox { x_min: 100, y_min: 30, x_max: 200, y_max: 60 },
@@ -817,12 +867,14 @@ mod tests {
                             row_span: 1,
                             col_span: 1,
                             text: "Data 2".to_string(),
+                            score: 1.0,
                         },
                     ],
                 },
             ],
             num_rows: 2,
             num_cols: 2,
+            unassigned_lines: vec![],
         };
 
         let html = structure.to_html();

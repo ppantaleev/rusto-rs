@@ -1,10 +1,10 @@
 use std::path::Path;
 
 #[cfg(feature = "use-opencv")]
-use opencv::{core, imgproc, prelude::*};
+use opencv::{core, core::Point2f, imgproc, prelude::*};
 
 #[cfg(not(feature = "use-opencv"))]
-use crate::image_impl::{self, Mat, Rect};
+use crate::image_impl::{self, Mat, Point2f, Rect};
 
 use crate::config::InitializeConfig;
 use crate::engine::EngineError;
@@ -12,7 +12,8 @@ use crate::layout::{BBox, LayoutDetector, LayoutRegion, LayoutType, RegionRole};
 use crate::orient::PageOrientation;
 use crate::rusto_ocr::RustO;
 use crate::table::{TableDetector, TableDetectorConfig, TableStructure, TableStructureConfig, TableStructureRecognizer};
-use crate::types::{LayoutConfig, OrientConfig};
+use crate::table_decode::assign_lines_to_cells;
+use crate::types::{Frame, LayoutConfig, OrientConfig};
 use crate::TextResult;
 use serde::Serialize;
 use std::time::Instant;
@@ -121,6 +122,8 @@ pub struct DocRegion {
 pub struct DocPipeline {
     layout: LayoutDetector,
     ocr: RustO,
+    // Table structure runs on the layout table region; the detector is not used yet.
+    #[allow(dead_code)]
     table_detector: Option<TableDetector>,
     table_recognizer: Option<TableStructureRecognizer>,
 }
@@ -244,7 +247,7 @@ impl DocPipeline {
                 }
                 LayoutType::Table => {
                     // Tables - run recognition if configured
-                    if self.table_detector.is_some() && self.table_recognizer.is_some() {
+                    if self.table_recognizer.is_some() {
                         table_start.get_or_insert_with(Instant::now);
                         table_items += 1;
                         match self.process_table(&img, &region) {
@@ -273,7 +276,7 @@ impl DocPipeline {
 
         let ocr_ms = ocr_start.elapsed().as_secs_f64() * 1000.0;
         let ocr_items = blocks.iter().filter(|b| b.text.is_some()).count();
-        let table_configured = self.table_detector.is_some() && self.table_recognizer.is_some();
+        let table_configured = self.table_recognizer.is_some();
         let table_status = StageStatus {
             stage: Stage::Table,
             state: if table_configured {
@@ -321,63 +324,23 @@ impl DocPipeline {
         })
     }
 
-    /// Process a table region: recognize structure and OCR cells
+    /// Process a table region: OCR the crop once, recognise the structure in
+    /// page pixels and assign the OCR lines to the cells.
     fn process_table(&mut self, img: &Mat, region: &LayoutRegion) -> Result<String, EngineError> {
-        // 1. Crop table region
+        // `crop_image` clamps the crop to the page, so the crop origin is clamped alike.
+        let (x_min, y_min) = (region.bbox.x_min.max(0), region.bbox.y_min.max(0));
         let table_crop = self.crop_image(img, region)?;
-        
-        // 2. Recognize table structure
-        let mut structure = self.table_recognizer.as_mut().unwrap()
-            .recognize(&table_crop)?;
-        
-        // 3. OCR each cell
-        #[cfg(feature = "use-opencv")]
-        let (img_h, img_w) = (table_crop.rows(), table_crop.cols());
-        #[cfg(not(feature = "use-opencv"))]
-        let size = table_crop.size()?;
-        #[cfg(not(feature = "use-opencv"))]
-        let (img_h, img_w) = (size.height, size.width);
-        
-        for row in &mut structure.rows {
-            for cell in &mut row.cells {
-                // Scale cell bbox to actual image size
-                let cell_bbox = &cell.bbox;
-                let x_min = (cell_bbox.x_min as f32 * img_w as f32 / 100.0) as i32;
-                let y_min = (cell_bbox.y_min as f32 * img_h as f32 / 100.0) as i32;
-                let x_max = (cell_bbox.x_max as f32 * img_w as f32 / 100.0) as i32;
-                let y_max = (cell_bbox.y_max as f32 * img_h as f32 / 100.0) as i32;
-                
-                // Create a region for the cell
-                let cell_region = LayoutRegion {
-                    bbox: crate::layout::BBox { x_min, y_min, x_max, y_max },
-                    layout_type: LayoutType::Text,
-                    reading_order: 0.0,
-                    confidence: 1.0,
-                };
-                
-                // Crop and OCR the cell
-                match self.crop_image(&table_crop, &cell_region) {
-                    Ok(cell_crop) => {
-                        match self.ocr.run_on_mat_with_options(
-                            &cell_crop,
-                            &crate::OcrRunOptions::default(),
-                        ) {
-                            Ok(ocr_res) => {
-                                cell.text = ocr_res.txts.join(" ");
-                            }
-                            Err(_) => {
-                                cell.text = String::new();
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        cell.text = String::new();
-                    }
-                }
-            }
-        }
-        
-        // 4. Generate HTML
+
+        let options = crate::OcrRunOptions { orientation: Some(false), ..Default::default() };
+        let ocr = self.ocr.run_on_mat_with_options(&table_crop, &options)?;
+        let lines = lines_from_ocr(&ocr.boxes, &ocr.txts, &ocr.scores, (x_min, y_min));
+
+        let recognizer = self
+            .table_recognizer
+            .as_mut()
+            .ok_or_else(|| EngineError::Engine("table recognizer is not configured".to_string()))?;
+        let mut structure = recognizer.recognize_at(&table_crop, x_min, y_min)?;
+        assign_lines_to_cells(&mut structure, lines);
         Ok(structure.to_html())
     }
 
@@ -440,6 +403,28 @@ impl DocPipeline {
         };
         image_impl::crop(img, valid_rect).map_err(|e| EngineError::ImageError(e.to_string()))
     }
+}
+
+/// Convert OCR output to text lines. `offset` is added to every point, which
+/// maps lines found in a crop back to page coordinates. The frame is the
+/// axis-aligned box of the four points. Only as many lines as the shortest of
+/// the three slices are returned.
+pub(crate) fn lines_from_ocr(
+    boxes: &[[Point2f; 4]],
+    txts: &[String],
+    scores: &[f32],
+    offset: (i32, i32),
+) -> Vec<TextResult> {
+    let (dx, dy) = (offset.0 as f32, offset.1 as f32);
+    boxes
+        .iter()
+        .zip(txts)
+        .zip(scores)
+        .map(|((quad, text), &score)| {
+            let box_points = [0, 1, 2, 3].map(|i| (quad[i].x + dx, quad[i].y + dy));
+            TextResult { text: text.clone(), score, frame: Frame::from_points(&box_points), box_points }
+        })
+        .collect()
 }
 
 impl DocResult {
@@ -640,5 +625,64 @@ mod tests {
         })
         .unwrap();
         assert_eq!(skipped, serde_json::json!({"stage": "layout", "state": "skipped", "reason": "x"}));
+    }
+
+    #[cfg(not(feature = "use-opencv"))]
+    #[test]
+    fn lines_from_ocr_adds_offset_and_builds_frame() {
+        let p = |x, y| Point2f { x, y };
+        let boxes = [[p(10.0, 5.0), p(40.0, 5.0), p(40.0, 25.0), p(10.0, 25.0)]];
+        let lines = lines_from_ocr(&boxes, &["ab".to_string()], &[0.75], (100, 200));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "ab");
+        assert_eq!(lines[0].score, 0.75);
+        assert_eq!(lines[0].box_points[0], (110.0, 205.0));
+        assert_eq!(lines[0].box_points[2], (140.0, 225.0));
+        assert_eq!(lines[0].frame, Frame::new(30.0, 20.0, 205.0, 110.0));
+        // Slices of unequal length give the shortest.
+        assert!(lines_from_ocr(&boxes, &[], &[0.5], (0, 0)).is_empty());
+    }
+
+    /// Whole pipeline of `process_table` on the 3x4 fixture with a real OCR and
+    /// the real table model. `RUSTO_TEST_MODELS` must hold `det.onnx`,
+    /// `rec.onnx` and a Cyrillic `dict.txt` (PP-OCRv5 detector, Cyrillic recogniser).
+    #[cfg(not(feature = "use-opencv"))]
+    #[test]
+    #[ignore = "requires models/DocOCR and RUSTO_TEST_MODELS with Cyrillic OCR models"]
+    fn table_fixture_text_lands_in_cells() {
+        use crate::table::TableStructureConfig;
+
+        let Ok(dir) = std::env::var("RUSTO_TEST_MODELS") else {
+            eprintln!("skipped: set RUSTO_TEST_MODELS to a directory with det.onnx, rec.onnx, dict.txt");
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fixture = root.join("tests/fixtures/doc/table_3x4_merged");
+        let truth: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fixture.with_extension("json")).unwrap()).unwrap();
+        let img = image_impl::imread(fixture.with_extension("png")).unwrap();
+
+        let mut ocr = RustO::initialize(InitializeConfig::ppv5(dir.join("det.onnx"), dir.join("rec.onnx"), dir.join("dict.txt"))).unwrap();
+        let options = crate::OcrRunOptions { orientation: Some(false), ..Default::default() };
+        let out = ocr.run_on_mat_with_options(&img, &options).unwrap();
+        let lines = lines_from_ocr(&out.boxes, &out.txts, &out.scores, (0, 0));
+        let mut rec = TableStructureRecognizer::new(TableStructureConfig::slanet_plus(root.join("models/DocOCR/table_slanetplus.rten"))).unwrap();
+        let mut s = rec.recognize_at(&img, 0, 0).unwrap();
+        assign_lines_to_cells(&mut s, lines.clone());
+
+        let texts: Vec<Vec<String>> = s.rows.iter().map(|r| r.cells.iter().map(|c| c.text.clone()).collect()).collect();
+        eprintln!("grid {}x{}, unassigned {}: {texts:?}", s.num_rows, s.num_cols, s.unassigned_lines.len());
+        eprintln!("markdown:\n{}", s.to_markdown());
+        assert_eq!((s.num_rows, s.num_cols), (3, 4));
+        let expected: Vec<Vec<String>> = truth["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect())
+            .collect();
+        // Texts are compared per row in cell order; the merged header cell is one entry.
+        assert_eq!(texts, expected);
+        assert!(s.unassigned_lines.is_empty());
     }
 }
