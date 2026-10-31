@@ -581,8 +581,9 @@ pub(crate) fn lines_from_ocr(
 impl DocResult {
     /// Markdown of the page, regions in `index` order. Footnotes follow the
     /// body as `[^n]` definitions, header/footer/number regions come last under
-    /// `## Page furniture`, and a caption moves behind the nearest preceding
-    /// image, chart or table. Empty `regions` give an empty string.
+    /// `## Page furniture`, and a caption moves behind the image, chart or
+    /// table only when that block is the immediately preceding body block;
+    /// otherwise it stays in reading order. Empty `regions` give an empty string.
     pub fn to_markdown(&self) -> String {
         let mut regions: Vec<&DocRegion> = self.regions.iter().collect();
         regions.sort_by_key(|r| r.index);
@@ -590,8 +591,8 @@ impl DocResult {
         let mut body: Vec<String> = Vec::new();
         let mut footnotes: Vec<String> = Vec::new();
         let mut furniture: Vec<String> = Vec::new();
-        // Insert position for captions: just behind the block of the nearest
-        // preceding image, chart or table.
+        // Insert position for captions: just behind the immediately preceding
+        // body block, and only while that block is an image, chart or table.
         let mut anchor: Option<usize> = None;
 
         for r in regions {
@@ -650,9 +651,9 @@ impl DocResult {
             let is_anchor = matches!(r.label, LayoutType::Image | LayoutType::Chart | LayoutType::Table);
             if let Some(b) = block {
                 body.push(b);
-                if is_anchor {
-                    anchor = Some(body.len());
-                }
+                // Any rendered body block other than a visual/table ends the
+                // caption window: a later caption stays in model order.
+                anchor = is_anchor.then_some(body.len());
             } else if is_anchor {
                 anchor = None;
             }
@@ -748,9 +749,30 @@ mod tests {
         assert_eq!(r.to_markdown(), "# Заглавие\n\n## Раздел\n\nАбзац.\n");
     }
     #[test]
-    fn caption_moves_after_nearest_preceding_visual() {
-        let r = result(vec![reg(0, LayoutType::Image, ""), reg(1, LayoutType::Text, "т"), reg(2, LayoutType::FigureTitle, "Фиг. 1")]);
+    fn caption_moves_after_immediately_preceding_visual() {
+        // Caption right after the image (model order: image, caption).
+        let r = result(vec![reg(0, LayoutType::Image, ""), reg(1, LayoutType::FigureTitle, "Фиг. 1"), reg(2, LayoutType::Text, "т")]);
         assert_eq!(r.to_markdown(), "![image](#region-0)\n\n*Фиг. 1*\n\nт\n");
+    }
+    #[test]
+    fn caption_after_a_paragraph_stays_in_place() {
+        let r = result(vec![reg(0, LayoutType::Image, ""), reg(1, LayoutType::Text, "т"), reg(2, LayoutType::FigureTitle, "Фиг. 1")]);
+        assert_eq!(r.to_markdown(), "![image](#region-0)\n\nт\n\n*Фиг. 1*\n");
+    }
+    #[test]
+    fn caption_between_paragraph_and_second_table_does_not_jump_to_first_table() {
+        let mut r = result(vec![
+            reg(0, LayoutType::Table, ""),
+            reg(1, LayoutType::Text, "между"),
+            reg(2, LayoutType::FigureTitle, "Табл. 2"),
+            reg(3, LayoutType::Table, ""),
+        ]);
+        r.regions[0].table = Some(grid(1));
+        r.regions[3].table = Some(grid(1));
+        let md = r.to_markdown();
+        let (para, cap) = (md.find("между").unwrap(), md.find("*Табл. 2*").unwrap());
+        let second = md.rfind("| ").unwrap();
+        assert!(para < cap && cap < second, "{md}");
     }
     #[test]
     fn caption_without_preceding_visual_stays_in_place() {
