@@ -70,7 +70,9 @@ pub use config::{ModelPreset, InitializeConfig, PPV3_MODEL_CONFIG, PPV4_MODEL_CO
 pub use rusto_ocr::{DetectionRunOptions, PostprocessRunOptions};
 pub use det::TextDetector;
 pub use doc_pipeline::{DocBlock, DocPipeline, DocPipelineConfig, DocResult};
-pub use layout::{LayoutDetector, LayoutOutput, LayoutRegion, LayoutType};
+pub use layout::{
+    drop_nested_text_regions, LayoutDetector, LayoutOutput, LayoutRegion, LayoutType, RegionRole, PP_DOCLAYOUT_V3_LABELS,
+};
 pub use orient::{decide_orientation, rotate_box, rotate_box_back, rotate_point_back, OrientClassifier, OrientOutput, Orientation, PageOrientation};
 pub use rec::{TextRecOutput, TextRecognizer, WordInfo, WordType};
 pub use rusto_ocr::{DetectTextResult, ImageSource, OcrRunOptions, OutputGranularity, RustO};

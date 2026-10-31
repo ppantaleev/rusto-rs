@@ -488,11 +488,13 @@ impl LayoutConfig {
             model_type: ModelType::Mobile,
             task_type: TaskType::Layout,
             model_path,
-            mean: [0.485, 0.456, 0.406], // ImageNet mean
-            std: [0.229, 0.224, 0.225],  // ImageNet std
-            conf_thresh: 0.4,
+            // PP-DocLayoutV3 `inference.yml`: mean 0 / std 1 (pixels / 255 only), 800x800.
+            mean: [0.0; 3],
+            std: [1.0; 3],
+            conf_thresh: 0.5,
+            // Unused: the DETR-style output needs no NMS.
             iou_thresh: 0.5,
-            target_size: 640, // Default for PP-DocLayout_plus-L
+            target_size: 800,
             engine_cfg: EngineConfig::default(),
         }
     }

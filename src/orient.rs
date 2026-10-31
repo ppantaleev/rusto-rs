@@ -438,7 +438,7 @@ pub fn rotate_box(bbox: &BBox, cw_degrees: u16, src_w: u32, src_h: u32) -> BBox 
         90 => BBox { x_min: h - bbox.y_max, y_min: bbox.x_min, x_max: h - bbox.y_min, y_max: bbox.x_max },
         180 => BBox { x_min: w - bbox.x_max, y_min: h - bbox.y_max, x_max: w - bbox.x_min, y_max: h - bbox.y_min },
         270 => BBox { x_min: bbox.y_min, y_min: w - bbox.x_max, x_max: bbox.y_max, y_max: w - bbox.x_min },
-        _ => bbox.clone(),
+        _ => *bbox,
     }
 }
 
@@ -447,7 +447,7 @@ pub fn rotate_box(bbox: &BBox, cw_degrees: u16, src_w: u32, src_h: u32) -> BBox 
 pub fn rotate_box_back(bbox: &BBox, applied_degrees: u16, corrected_w: u32, corrected_h: u32) -> BBox {
     match inverse_degrees(applied_degrees) {
         Some(inv) => rotate_box(bbox, inv, corrected_w, corrected_h),
-        None => bbox.clone(),
+        None => *bbox,
     }
 }
 

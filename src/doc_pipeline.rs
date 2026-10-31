@@ -8,7 +8,7 @@ use crate::image_impl::{self, Mat, Rect};
 
 use crate::config::InitializeConfig;
 use crate::engine::EngineError;
-use crate::layout::{LayoutDetector, LayoutRegion, LayoutType};
+use crate::layout::{LayoutDetector, LayoutRegion, LayoutType, RegionRole};
 use crate::rusto_ocr::RustO;
 use crate::table::{TableDetector, TableDetectorConfig, TableStructureConfig, TableStructureRecognizer};
 use crate::types::LayoutConfig;
@@ -92,14 +92,8 @@ impl DocPipeline {
         // 2. Process each region
         for region in regions {
             match region.layout_type {
-                LayoutType::Text
-                | LayoutType::Title
-                | LayoutType::FigureCaption
-                | LayoutType::TableCaption
-                | LayoutType::Header
-                | LayoutType::Footer
-                | LayoutType::Reference
-                | LayoutType::Equation => {
+                // Interim routing by role; rewritten in the document pipeline task.
+                lt if lt.role().needs_ocr() || lt.role() == RegionRole::Formula => {
                     // Crop and OCR
                     let crop = self.crop_image(&img, &region)?;
                     let ocr_res = self.ocr.run_on_mat_with_options(
@@ -144,6 +138,9 @@ impl DocPipeline {
                         blocks.push(DocBlock { region, text: None, html: None });
                     }
                 }
+                _ => {
+                    blocks.push(DocBlock { region, text: None, html: None });
+                }
             }
         }
 
@@ -180,6 +177,7 @@ impl DocPipeline {
                 let cell_region = LayoutRegion {
                     bbox: crate::layout::BBox { x_min, y_min, x_max, y_max },
                     layout_type: LayoutType::Text,
+                    reading_order: 0.0,
                     confidence: 1.0,
                 };
                 
