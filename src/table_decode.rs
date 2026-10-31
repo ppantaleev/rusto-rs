@@ -406,7 +406,7 @@ fn target_cell(line: &TextResult, boxes: &[BBox]) -> Option<usize> {
 /// Order the lines of one cell for reading: lines whose vertical centres differ
 /// by at most half the smaller line height form a band, bands run top to
 /// bottom and each band left to right.
-fn reading_order(lines: &mut Vec<TextResult>) {
+pub(crate) fn reading_order(lines: &mut Vec<TextResult>) {
     let centre_y = |l: &TextResult| l.frame.top + l.frame.height / 2.0;
     lines.sort_by(|a, b| centre_y(a).total_cmp(&centre_y(b)));
     let mut bands: Vec<Vec<TextResult>> = Vec::new();
