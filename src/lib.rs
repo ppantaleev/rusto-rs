@@ -76,7 +76,7 @@ pub use layout::{
 pub use orient::{decide_orientation, rotate_box, rotate_box_back, rotate_point_back, OrientClassifier, OrientOutput, Orientation, PageOrientation};
 pub use rec::{TextRecOutput, TextRecognizer, WordInfo, WordType};
 pub use rusto_ocr::{DetectTextResult, ImageSource, OcrRunOptions, OutputGranularity, RustO};
-pub use table::{TableDetector, TableDetectorConfig, TableModelType, TableStructure, TableStructureConfig, TableStructureRecognizer};
+pub use table::{SLANET_PLUS_DICT, TableDetector, TableDetectorConfig, TableModelType, TableStructure, TableStructureConfig, TableStructureRecognizer};
 pub use types::{ClsConfig, DetConfig, Frame, GlobalConfig, LayoutConfig, OrientConfig, OrientPreprocess, RecConfig};
 
 // Re-export for easier access

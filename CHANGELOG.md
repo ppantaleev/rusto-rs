@@ -11,10 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **doc**: scripts/download_doc_models.sh downloads and verifies RapidAI orientation v2, PP-DocLayoutV3 and SLANet_plus models (Apache-2.0)
 - **orient**: OrientConfig::rapid_orientation_v2 (resize-short 256, centre crop 224, ImageNet normalisation), PageOrientation, rotate_box_back
 - **layout**: PP-DocLayoutV3 support (25 labels, [N,7] output, reading order)
+- **table**: SLANet_plus table structure model type (`TableStructureConfig::slanet_plus`, 488 px keep-ratio input `x`, 500 tokens), embedded structure dictionary `SLANET_PLUS_DICT` with ONNX `character` metadata override, `EngineSession::metadata_value`; pre-processing and dictionary translated from bobine 0.7.3 (MIT)
 
 ### Changed
 - **doc**: DocPipelineConfig is #[non_exhaustive]; use DocPipelineConfig::new(layout, ocr) and with_* builders
 - **layout**: LayoutConfig defaults 800 px, mean 0/std 1, conf_thresh 0.5 (was 0.4, unused); LayoutType is #[non_exhaustive]
+- **table**: TableStructureConfig and TableModelType are #[non_exhaustive]; the default config is now SLANet_plus (`models/DocOCR/table_slanetplus.rten`) and the recogniser rejects the SLANeXt model types
 
 ## [0.3.2] - 2026-10-25
 

@@ -27,7 +27,7 @@ struct Args {
     #[arg(long, short = 'o')]
     output: Option<PathBuf>,
 
-    /// Enable table recognition (requires rtdetr and slanext models in the same dir as layout model)
+    /// Enable table recognition (requires the rtdetr and table_slanetplus models in the same dir as layout model)
     #[arg(long, default_value_t = true)]
     table: bool,
 }
@@ -52,10 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 iou_threshold: 0.5,
                 model_type: TableModelType::Wired,
             }),
-            Some(TableStructureConfig {
-                model_path: model_dir.join("slanext-wired.onnx"),
-                model_type: TableModelType::Wired,
-            }),
+            Some(TableStructureConfig::slanet_plus(model_dir.join("table_slanetplus.rten"))),
         )
     } else {
         (None, None)

@@ -176,6 +176,16 @@ impl EngineSession {
             Self::Custom(s) => s.have_key(key),
         }
     }
+
+    /// Raw string value of a custom model-metadata key (ONNX `metadata_props`).
+    /// `.rten` files do not keep custom metadata, and custom backends expose
+    /// none, so this returns `None` for them.
+    pub fn metadata_value(&self, key: &str) -> Option<String> {
+        match self {
+            Self::Rten(s) => s.metadata_value(key),
+            Self::Custom(_) => None,
+        }
+    }
 }
 
 impl InferenceSession for EngineSession {
@@ -461,6 +471,10 @@ impl RtenSession {
 
     pub fn have_key(&self, _key: &str) -> bool {
         false
+    }
+
+    pub fn metadata_value(&self, key: &str) -> Option<String> {
+        self.model.metadata().get(key).map(str::to_string)
     }
 }
 
