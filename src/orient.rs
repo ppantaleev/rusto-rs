@@ -537,23 +537,28 @@ mod tests {
     fn solid(w: u32, h: u32, v: u8) -> Mat { Mat::new(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, image::Rgb([v, v, v])))) }
     fn out(o: Orientation, c: f32) -> OrientOutput { OrientOutput { orientation: o, confidence: c, elapse: 0.0 } }
 
-    /// Black image with an RGB(255, 128, 0) rectangle `x0..x1` x `y0..y1`.
-    fn rect_image(w: u32, h: u32, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> Mat {
+    type Rect = (u32, u32, u32, u32);
+
+    /// Black image with an RGB(255, 128, 0) rectangle `x0..x1` x `y0..y1`, then an optional black `hole`.
+    fn rect_image(w: u32, h: u32, (x0, y0, x1, y1): Rect, hole: Option<Rect>) -> Mat {
         let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([0, 0, 0]));
         for y in y0..y1 { for x in x0..x1 { img.put_pixel(x, y, image::Rgb([255, 128, 0])); } }
+        if let Some((hx0, hy0, hx1, hy1)) = hole {
+            for y in hy0..hy1 { for x in hx0..hx1 { img.put_pixel(x, y, image::Rgb([0, 0, 0])); } }
+        }
         Mat::new(image::DynamicImage::ImageRgb8(img))
     }
 
     /// Every pixel of the crop must be inside the rectangle (so a plain stretch or a wrong
     /// crop offset would read black) and normalised per channel with ImageNet mean/std.
-    fn assert_crop_is_rectangle(t: &ndarray::Array4<f32>) {
+    fn assert_crop_is_rectangle(t: &ndarray::Array4<f32>, points: &[(usize, usize)]) {
         assert_eq!(t.shape(), &[1, 3, 224, 224]);
         let mean = [0.485f32, 0.456, 0.406];
         let std = [0.229f32, 0.224, 0.225];
         let rgb = [255.0f32, 128.0, 0.0];
         for c in 0..3 {
             let want = (rgb[c] / 255.0 - mean[c]) / std[c];
-            for (y, x) in [(0, 0), (0, 223), (223, 0), (223, 223), (112, 112)] {
+            for &(y, x) in points {
                 assert!((t[[0, c, y, x]] - want).abs() < 1e-3, "channel {c} at ({y},{x}): {} vs {want}", t[[0, c, y, x]]);
             }
         }
@@ -563,18 +568,24 @@ mod tests {
     fn orient_input_center_crop_uses_imagenet_normalisation() {
         // 512x256: short side already 256 (scale 1); crop is x 144..368, y 16..240.
         let cfg = OrientConfig::rapid_orientation_v2("unused.rten".into());
-        let t = orient_input(&rect_image(512, 256, (144, 16, 368, 240)), &cfg).unwrap();
-        assert_crop_is_rectangle(&t);
+        let t = orient_input(&rect_image(512, 256, (144, 16, 368, 240), None), &cfg).unwrap();
+        assert_crop_is_rectangle(&t, &[(0, 0), (0, 223), (223, 0), (223, 223), (112, 112)]);
     }
     #[test]
     fn orient_input_center_crop_resizes_short_side_to_256() {
         let cfg = OrientConfig::rapid_orientation_v2("unused.rten".into());
-        // Landscape 1024x512 -> 512x256 (crop x 144..368, y 16..240); rectangle is 2 px inside the crop.
-        let t = orient_input(&rect_image(1024, 512, (284, 28, 740, 484)), &cfg).unwrap();
-        assert_crop_is_rectangle(&t);
-        // Portrait 512x1024 -> 256x512 (crop x 16..240, y 144..368).
-        let t = orient_input(&rect_image(512, 1024, (28, 284, 484, 740)), &cfg).unwrap();
-        assert_crop_is_rectangle(&t);
+        // The rectangle is exactly the resized crop window in source pixels. A black hole covers the
+        // crop that a missing resize would read, so skipping the resize reads black at the inset corners.
+        // The checked points are inset by 4 px so the resize filter does not blend the rectangle edge.
+        let pts = [(4, 4), (4, 219), (219, 4), (219, 219)];
+        // Landscape 1024x512 -> 512x256: crop x 144..368, y 16..240 = source 288..736 x 32..480;
+        // without resize the crop would be source 400..624 x 144..368.
+        let t = orient_input(&rect_image(1024, 512, (288, 32, 736, 480), Some((400, 144, 624, 368))), &cfg).unwrap();
+        assert_crop_is_rectangle(&t, &pts);
+        // Portrait 512x1024 -> 256x512: crop x 16..240, y 144..368 = source 32..480 x 288..736;
+        // without resize the crop would be source 144..368 x 400..624.
+        let t = orient_input(&rect_image(512, 1024, (32, 288, 480, 736), Some((144, 400, 368, 624))), &cfg).unwrap();
+        assert_crop_is_rectangle(&t, &pts);
     }
     #[test]
     fn orient_input_stretch_keeps_legacy_scaling() {
