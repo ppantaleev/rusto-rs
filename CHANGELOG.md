@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **table**: SLANet_plus table structure model type (`TableStructureConfig::slanet_plus`, 488 px keep-ratio input `x`, 500 tokens), embedded structure dictionary `SLANET_PLUS_DICT` with ONNX `character` metadata override, `EngineSession::metadata_value`; pre-processing and dictionary translated from bobine 0.7.3 (MIT)
 - **table**: SLANet_plus structure with rowspan/colspan, cell boxes, cell text, unassigned_lines (decoder translated from bobine 0.7.3 rapid_table.rs, MIT)
 - **doc**: DocPipeline::run_with_image, corrected-page coordinates, per-region OCR, vertical text, stage status; examples/document_layout.rs
+- **cli**: `--enable-layout`, `--layout-model`, `--enable-table`, `--table-model`, `--save-corrected`, `--format document`; `--enable-orient` now runs orientation (plain OCR keeps original-scan coordinates); `--orient-model` requires `--enable-orient` and defaults to `models/DocOCR/orient_rapidai_v2.rten`
 
 ### Changed
 - **doc**: DocPipelineConfig is #[non_exhaustive]; use DocPipelineConfig::new(layout, ocr) and with_* builders
