@@ -76,7 +76,7 @@ Bash, `set -euo pipefail`, options `--convert-rten`, `--keep-onnx` (default keep
 
 | Output name | URL | SHA-256 of the ONNX |
 |---|---|---|
-| `orient_rapidai_v2.onnx` | `https://github.com/RapidAI/RapidOrientation/releases/download/v0.0.0/rapid_orientation_models_v2.zip` (zip SHA-256 `bd21b970190538ae12f7f84972ab496f2aae79fbe4c5af4813920a7611a81d96`; member `rapid_orientation/rapid_orientation.onnx`) | `2f62c9bfb830a0b417241269fde7ef2d0ad5446c0ed2b8af33b1f6543545e8e2` |
+| `orient_rapidai_v2.onnx` | `https://github.com/RapidAI/RapidOrientation/releases/download/v0.0.0/rapid_orientation_models_v2.zip` (zip SHA-256 `bd21b970190538ae12f7f84972ab496f2aae79fbe4c5af4813920a7611a81d96`; member `rapid_orientation_models_v2/rapid_orientation.onnx`) | `2f62c9bfb830a0b417241269fde7ef2d0ad5446c0ed2b8af33b1f6543545e8e2` |
 | `layout_ppdoclayoutv3.onnx` | `https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx/resolve/main/inference.onnx` | `45bf71750b00739a41fc209f132eb104a4d6b5bb29483c9078164d8b87cf28ba` |
 | `table_slanetplus.onnx` | `https://github.com/RapidAI/RapidTable/releases/download/assets/slanet-plus.onnx` | `d57a942af6a2f57d6a4a0372573c696a2379bf5857c45e2ac69993f3b334514b` |
 
