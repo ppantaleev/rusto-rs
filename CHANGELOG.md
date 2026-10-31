@@ -33,7 +33,7 @@ Entries by other contributors that landed in the history before this branch and 
 - **doc**: Breaking (struct literals): `LayoutRegion` gains `reading_order` and `OrientConfig` gains `preprocess`; code that builds them with struct literals must add the fields
 - **layout**: Breaking: layout outputs of shape `[N,6]` (the earlier 10-class decoder with NMS, including PP-DocLayout_plus-L) are no longer accepted; only the PP-DocLayoutV3 `[N,7]` output is decoded. `LayoutDetector::new` of an older model fails with a clear `[N,7]` error
 - **api**: `OrientConfig::rapid_orientation_v2` and `LayoutConfig::default` take `impl Into<PathBuf>`, so a `&str` works; `PathBuf` callers still compile, but a call that passes `"…".into()` now needs the type annotation removed
-- **api**: `Stage`, `StageState` and `RegionRole` are #[non_exhaustive]; a `match` on them outside the crate needs a `_ =>` arm
+- **api**: `DocStage`, `StageState` and `RegionRole` are #[non_exhaustive]; a `match` on them outside the crate needs a `_ =>` arm
 - **api**: `table::BBox` is now the same type as `layout::BBox` (re-exported), so `rotate_box_back` accepts table cell boxes; `layout::BBox` is `Copy + PartialEq + Eq + Serialize`
 - **cli**: `--save-corrected` accepts only `.png`, `.jpg` and `.jpeg` (case-insensitive) and rejects other extensions before models load
 - **doc**: `DocPipelineConfig::table_detector` is kept, but the stub cell detector is never run: `DocPipeline::new` does not load its model and only checks that a configured path exists; `examples/doc_pipeline_demo.rs` no longer needs an rtdetr model

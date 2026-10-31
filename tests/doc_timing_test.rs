@@ -11,7 +11,7 @@ use std::time::Instant;
 use rusto::image_impl::Mat;
 use rusto::{
     decide_orientation, DocPipeline, DocPipelineConfig, InitializeConfig, LayoutConfig,
-    LayoutDetector, LayoutType, OrientClassifier, OrientConfig, Stage, StageState,
+    LayoutDetector, LayoutType, OrientClassifier, OrientConfig, DocStage, StageState,
     TableStructureConfig, TableStructureRecognizer,
 };
 
@@ -132,7 +132,7 @@ fn pipeline_stage_timings() {
         let (r, _) = pipeline.run_with_image(&mat).unwrap();
         totals.push(s.elapsed().as_secs_f64() * 1000.0);
         for st in &r.stages {
-            if let (Stage::Table, StageState::Ran { elapsed_ms, .. }) = (&st.stage, &st.state) {
+            if let (DocStage::Table, StageState::Ran { elapsed_ms, .. }) = (&st.stage, &st.state) {
                 table_stage.push(*elapsed_ms);
             }
         }

@@ -70,7 +70,7 @@ pub use calibration::{CalibrationOptions, OptimizationOptions};
 pub use config::{ModelPreset, InitializeConfig, PPV3_MODEL_CONFIG, PPV4_MODEL_CONFIG, PPV5_MODEL_CONFIG, PPV6_MODEL_CONFIG};
 pub use rusto_ocr::{DetectionRunOptions, PostprocessRunOptions};
 pub use det::TextDetector;
-pub use doc_pipeline::{DocBlock, DocPipeline, DocPipelineConfig, DocRegion, DocResult, Stage, StageState, StageStatus};
+pub use doc_pipeline::{DocBlock, DocPipeline, DocPipelineConfig, DocRegion, DocResult, DocStage, StageState, StageStatus};
 pub use layout::{
     drop_nested_text_regions, LayoutDetector, LayoutOutput, LayoutRegion, LayoutType, RegionRole, PP_DOCLAYOUT_V3_LABELS,
 };

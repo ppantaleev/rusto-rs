@@ -92,7 +92,7 @@ fn validate_config(cfg: &DocPipelineConfig) -> Result<(), EngineError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum Stage {
+pub enum DocStage {
     Orientation,
     Layout,
     Ocr,
@@ -111,7 +111,7 @@ pub enum StageState {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StageStatus {
-    pub stage: Stage,
+    pub stage: DocStage,
     #[serde(flatten)]
     pub state: StageState,
 }
@@ -501,10 +501,10 @@ impl DocPipeline {
             table_stats.state(Some("no table regions"))
         };
         let stages = vec![
-            StageStatus { stage: Stage::Orientation, state: orientation_state },
-            StageStatus { stage: Stage::Layout, state: layout_state },
-            StageStatus { stage: Stage::Ocr, state: ocr_stats.state(None) },
-            StageStatus { stage: Stage::Table, state: table_state },
+            StageStatus { stage: DocStage::Orientation, state: orientation_state },
+            StageStatus { stage: DocStage::Layout, state: layout_state },
+            StageStatus { stage: DocStage::Ocr, state: ocr_stats.state(None) },
+            StageStatus { stage: DocStage::Table, state: table_state },
         ];
 
         let result = DocResult {
@@ -1098,7 +1098,7 @@ mod tests {
                 table: None,
             }],
             stages: vec![StageStatus {
-                stage: Stage::Table,
+                stage: DocStage::Table,
                 state: StageState::Skipped { reason: "table model not configured".into() },
             }],
             blocks: vec![],
@@ -1112,21 +1112,33 @@ mod tests {
     }
 
     #[test]
+    fn doc_stage_serialises_as_pinned_snake_case_names() {
+        for (stage, name) in [
+            (DocStage::Orientation, "orientation"),
+            (DocStage::Layout, "layout"),
+            (DocStage::Ocr, "ocr"),
+            (DocStage::Table, "table"),
+        ] {
+            assert_eq!(serde_json::to_value(stage).unwrap(), serde_json::json!(name));
+        }
+    }
+
+    #[test]
     fn stage_status_serialises_each_variant_flat() {
         let ran = serde_json::to_value(StageStatus {
-            stage: Stage::Ocr,
+            stage: DocStage::Ocr,
             state: StageState::Ran { elapsed_ms: 1.5, items: 3 },
         })
         .unwrap();
         assert_eq!(ran, serde_json::json!({"stage": "ocr", "state": "ran", "elapsed_ms": 1.5, "items": 3}));
         let failed = serde_json::to_value(StageStatus {
-            stage: Stage::Orientation,
+            stage: DocStage::Orientation,
             state: StageState::Failed { reason: "boom".into() },
         })
         .unwrap();
         assert_eq!(failed, serde_json::json!({"stage": "orientation", "state": "failed", "reason": "boom"}));
         let skipped = serde_json::to_value(StageStatus {
-            stage: Stage::Layout,
+            stage: DocStage::Layout,
             state: StageState::Skipped { reason: "x".into() },
         })
         .unwrap();

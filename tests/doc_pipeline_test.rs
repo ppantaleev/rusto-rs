@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use rusto::image_impl::Mat;
 use rusto::{
-    DocPipeline, DocPipelineConfig, InitializeConfig, LayoutConfig, OrientConfig, Stage, StageState,
+    DocPipeline, DocPipelineConfig, InitializeConfig, LayoutConfig, OrientConfig, DocStage, StageState,
     TableStructureConfig,
 };
 
@@ -55,7 +55,7 @@ fn blank_page_yields_no_regions() {
     let (r, _) = pipeline.run_with_image(&blank).unwrap();
     assert!(r.regions.is_empty());
     assert_eq!(r.to_markdown(), "");
-    assert!(r.stages.iter().any(|s| s.stage == Stage::Layout && matches!(s.state, StageState::Ran { items: 0, .. })));
+    assert!(r.stages.iter().any(|s| s.stage == DocStage::Layout && matches!(s.state, StageState::Ran { items: 0, .. })));
 }
 
 #[test]
