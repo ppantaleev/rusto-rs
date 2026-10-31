@@ -61,7 +61,7 @@ struct Cli {
     #[arg(long, requires = "enable_table", default_value = "models/DocOCR/table_slanetplus.rten")]
     table_model: PathBuf,
 
-    /// Write the orientation-corrected page (PNG) to this path
+    /// Write the orientation-corrected page to this path (PNG or JPEG, by extension)
     #[arg(long, requires = "enable_layout")]
     save_corrected: Option<PathBuf>,
 }
@@ -107,6 +107,15 @@ fn plan_run(cli: &Cli) -> Result<RunPlan, String> {
     }
     if !matches!(cli.format, OutputFormat::Document | OutputFormat::Markdown) {
         return Err("with --enable-layout use --format document or --format markdown".to_string());
+    }
+    if let Some(path) = &cli.save_corrected {
+        let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+        if !matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg")) {
+            return Err(format!(
+                "--save-corrected: unsupported extension for {}; use .png, .jpg or .jpeg",
+                path.display()
+            ));
+        }
     }
     Ok(RunPlan::Document {
         orient,
@@ -244,6 +253,17 @@ mod tests {
             panic!()
         };
         assert_eq!((t, s), (PathBuf::from("models/DocOCR/table_slanetplus.rten"), PathBuf::from("c.png")));
+    }
+    #[test]
+    fn save_corrected_extension_is_checked_before_model_loading() {
+        let bmp = parse(&["--enable-layout", "--format", "document", "--save-corrected", "c.bmp"]).unwrap();
+        assert!(plan_run(&bmp).err().unwrap().contains("--save-corrected"));
+        let none = parse(&["--enable-layout", "--format", "document", "--save-corrected", "c"]).unwrap();
+        assert!(plan_run(&none).is_err());
+        for ok in ["c.PNG", "c.jpg", "c.JPEG"] {
+            let cli = parse(&["--enable-layout", "--format", "document", "--save-corrected", ok]).unwrap();
+            assert!(matches!(plan_run(&cli), Ok(RunPlan::Document { save_corrected: Some(_), .. })), "{ok}");
+        }
     }
     #[test]
     fn dependent_flags_are_rejected_by_clap() {
