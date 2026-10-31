@@ -10,7 +10,7 @@ use opencv::prelude::*;
 use crate::image_impl::Mat;
 
 /// Bounding box for table cells
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct BBox {
     pub x_min: i32,
     pub y_min: i32,
@@ -19,7 +19,7 @@ pub struct BBox {
 }
 
 /// Table cell information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TableCell {
     pub bbox: BBox,
     pub row: usize,
@@ -30,13 +30,13 @@ pub struct TableCell {
 }
 
 /// Table row
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TableRow {
     pub cells: Vec<TableCell>,
 }
 
 /// Complete table structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TableStructure {
     pub rows: Vec<TableRow>,
     pub num_rows: usize,

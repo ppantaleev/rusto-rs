@@ -8,16 +8,114 @@ use crate::image_impl::{self, Mat, Rect};
 
 use crate::config::InitializeConfig;
 use crate::engine::EngineError;
-use crate::layout::{LayoutDetector, LayoutRegion, LayoutType, RegionRole};
+use crate::layout::{BBox, LayoutDetector, LayoutRegion, LayoutType, RegionRole};
+use crate::orient::PageOrientation;
 use crate::rusto_ocr::RustO;
-use crate::table::{TableDetector, TableDetectorConfig, TableStructureConfig, TableStructureRecognizer};
-use crate::types::LayoutConfig;
+use crate::table::{TableDetector, TableDetectorConfig, TableStructure, TableStructureConfig, TableStructureRecognizer};
+use crate::types::{LayoutConfig, OrientConfig};
+use crate::TextResult;
+use serde::Serialize;
+use std::time::Instant;
 
+/// Configuration of the document pipeline.
+///
+/// `#[non_exhaustive]`: build it with [`DocPipelineConfig::new`] and the
+/// `with_*` builders.
+#[non_exhaustive]
 pub struct DocPipelineConfig {
     pub layout: LayoutConfig,
     pub ocr: InitializeConfig,
     pub table_detector: Option<TableDetectorConfig>,
     pub table_recognizer: Option<TableStructureConfig>,
+    /// Page orientation model; `None` skips the orientation stage.
+    pub orient: Option<OrientConfig>,
+    /// The orientation correction is applied only at or above this confidence
+    /// (0.0..=1.0). Independent of `OrientConfig::conf_thresh`.
+    pub orient_min_confidence: f32,
+}
+
+impl DocPipelineConfig {
+    /// Layout and OCR are required; the other stages are off by default and
+    /// `orient_min_confidence` is 0.6.
+    pub fn new(layout: LayoutConfig, ocr: InitializeConfig) -> Self {
+        Self {
+            layout,
+            ocr,
+            table_detector: None,
+            table_recognizer: None,
+            orient: None,
+            orient_min_confidence: 0.6,
+        }
+    }
+
+    pub fn with_orientation(mut self, orient: OrientConfig) -> Self {
+        self.orient = Some(orient);
+        self
+    }
+
+    pub fn with_orient_min_confidence(mut self, min_confidence: f32) -> Self {
+        self.orient_min_confidence = min_confidence;
+        self
+    }
+
+    pub fn with_table_recognizer(mut self, recognizer: TableStructureConfig) -> Self {
+        self.table_recognizer = Some(recognizer);
+        self
+    }
+
+    pub fn with_table_detector(mut self, detector: TableDetectorConfig) -> Self {
+        self.table_detector = Some(detector);
+        self
+    }
+}
+
+fn validate_config(cfg: &DocPipelineConfig) -> Result<(), EngineError> {
+    if !(0.0..=1.0).contains(&cfg.orient_min_confidence) {
+        // Also rejects NaN: no comparison with NaN is true.
+        return Err(EngineError::Preprocess(
+            "orient_min_confidence must be within 0..=1".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// A pipeline stage, as reported in [`StageStatus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    Orientation,
+    Layout,
+    Ocr,
+    Table,
+}
+
+/// Outcome of one stage.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StageState {
+    Ran { elapsed_ms: f64, items: usize },
+    Skipped { reason: String },
+    Failed { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StageStatus {
+    pub stage: Stage,
+    #[serde(flatten)]
+    pub state: StageState,
+}
+
+/// A region in reading order with its recognised content.
+#[derive(Debug, Clone, Serialize)]
+pub struct DocRegion {
+    /// Position in reading order; anchor `#region-{index}`.
+    pub index: usize,
+    pub label: LayoutType,
+    pub bbox: BBox,
+    pub score: f32,
+    pub text: Option<String>,
+    pub lines: Vec<TextResult>,
+    pub table: Option<TableStructure>,
 }
 
 pub struct DocPipeline {
@@ -34,12 +132,21 @@ pub struct DocBlock {
     pub html: Option<String>, // For tables: HTML markup
 }
 
+/// Result of a document run. `width`/`height` are the corrected page size.
+#[derive(Debug, Clone, Serialize)]
 pub struct DocResult {
+    pub width: u32,
+    pub height: u32,
+    pub orientation: Option<PageOrientation>,
+    pub regions: Vec<DocRegion>,
+    pub stages: Vec<StageStatus>,
+    #[serde(skip)]
     pub blocks: Vec<DocBlock>,
 }
 
 impl DocPipeline {
     pub fn new(config: DocPipelineConfig) -> Result<Self, EngineError> {
+        validate_config(&config)?;
         let layout = LayoutDetector::new(config.layout)?;
         let ocr = RustO::initialize(config.ocr)?;
         
@@ -71,10 +178,25 @@ impl DocPipeline {
         use crate::image_impl::imread;
 
         let img = imread(image_path)?;
+        #[cfg(feature = "use-opencv")]
+        let (page_w, page_h) = (img.cols() as u32, img.rows() as u32);
+        #[cfg(not(feature = "use-opencv"))]
+        let (page_w, page_h) = {
+            let size = img.size()?;
+            (size.width as u32, size.height as u32)
+        };
 
         // 1. Layout Analysis
+        let layout_start = Instant::now();
         let layout_output = self.layout.detect(&img)?;
         let mut regions = layout_output.regions;
+        let layout_status = StageStatus {
+            stage: Stage::Layout,
+            state: StageState::Ran {
+                elapsed_ms: layout_start.elapsed().as_secs_f64() * 1000.0,
+                items: regions.len(),
+            },
+        };
 
         // Sort regions: top-to-bottom, left-to-right
         regions.sort_by(|a, b| {
@@ -88,6 +210,9 @@ impl DocPipeline {
         });
 
         let mut blocks = Vec::new();
+        let ocr_start = Instant::now();
+        let mut table_start: Option<Instant> = None;
+        let mut table_items = 0usize;
 
         // 2. Process each region
         for region in regions {
@@ -120,6 +245,8 @@ impl DocPipeline {
                 LayoutType::Table => {
                     // Tables - run recognition if configured
                     if self.table_detector.is_some() && self.table_recognizer.is_some() {
+                        table_start.get_or_insert_with(Instant::now);
+                        table_items += 1;
                         match self.process_table(&img, &region) {
                             Ok(html) => {
                                 blocks.push(DocBlock {
@@ -144,7 +271,54 @@ impl DocPipeline {
             }
         }
 
-        Ok(DocResult { blocks })
+        let ocr_ms = ocr_start.elapsed().as_secs_f64() * 1000.0;
+        let ocr_items = blocks.iter().filter(|b| b.text.is_some()).count();
+        let table_configured = self.table_detector.is_some() && self.table_recognizer.is_some();
+        let table_status = StageStatus {
+            stage: Stage::Table,
+            state: if table_configured {
+                StageState::Ran {
+                    elapsed_ms: table_start.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0),
+                    items: table_items,
+                }
+            } else {
+                StageState::Skipped { reason: "table model not configured".to_string() }
+            },
+        };
+        let doc_regions = blocks
+            .iter()
+            .enumerate()
+            .map(|(index, b)| DocRegion {
+                index,
+                label: b.region.layout_type,
+                bbox: b.region.bbox,
+                score: b.region.confidence,
+                text: b.text.clone(),
+                lines: Vec::new(),
+                table: None,
+            })
+            .collect();
+        let stages = vec![
+            StageStatus {
+                stage: Stage::Orientation,
+                state: StageState::Skipped { reason: "orientation model not configured".to_string() },
+            },
+            layout_status,
+            StageStatus {
+                stage: Stage::Ocr,
+                state: StageState::Ran { elapsed_ms: ocr_ms, items: ocr_items },
+            },
+            table_status,
+        ];
+
+        Ok(DocResult {
+            width: page_w,
+            height: page_h,
+            orientation: None,
+            regions: doc_regions,
+            stages,
+            blocks,
+        })
     }
 
     /// Process a table region: recognize structure and OCR cells
@@ -386,5 +560,85 @@ impl DocResult {
             || (trimmed.len() > 2 
                 && trimmed.chars().next().unwrap().is_ascii_digit()
                 && (trimmed.chars().nth(1) == Some('.') || trimmed.chars().nth(1) == Some(')')))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> DocPipelineConfig {
+        DocPipelineConfig::new(LayoutConfig::default("l.rten".into()), InitializeConfig::ppv5("d", "r", "k"))
+    }
+
+    #[test]
+    fn config_new_has_spec_defaults() {
+        let c = cfg();
+        assert!(c.orient.is_none() && c.table_recognizer.is_none() && c.table_detector.is_none());
+        assert_eq!(c.orient_min_confidence, 0.6);
+        let c = c
+            .with_orient_min_confidence(0.7)
+            .with_orientation(OrientConfig::rapid_orientation_v2("o.rten".into()));
+        assert_eq!(c.orient_min_confidence, 0.7);
+        assert!(c.orient.is_some());
+    }
+
+    #[test]
+    fn config_rejects_out_of_range_orient_confidence() {
+        for v in [-0.1, 1.1, f32::NAN] {
+            assert!(validate_config(&cfg().with_orient_min_confidence(v)).is_err());
+        }
+        assert!(validate_config(&cfg().with_orient_min_confidence(1.0)).is_ok());
+    }
+
+    #[test]
+    fn doc_result_json_shape() {
+        let r = DocResult {
+            width: 10,
+            height: 20,
+            orientation: Some(PageOrientation { applied_degrees: 270, detected_degrees: 90, confidence: 0.92 }),
+            regions: vec![DocRegion {
+                index: 0,
+                label: LayoutType::ParagraphTitle,
+                bbox: BBox { x_min: 1, y_min: 2, x_max: 3, y_max: 4 },
+                score: 0.9,
+                text: Some("Раздел".into()),
+                lines: vec![],
+                table: None,
+            }],
+            stages: vec![StageStatus {
+                stage: Stage::Table,
+                state: StageState::Skipped { reason: "table model not configured".into() },
+            }],
+            blocks: vec![],
+        };
+        let v: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["orientation"]["applied_degrees"], 270);
+        assert_eq!(v["regions"][0]["label"], "paragraph_title");
+        assert_eq!(v["stages"][0]["stage"], "table");
+        assert_eq!(v["stages"][0]["state"], "skipped");
+        assert!(v.get("blocks").is_none());
+    }
+
+    #[test]
+    fn stage_status_serialises_each_variant_flat() {
+        let ran = serde_json::to_value(StageStatus {
+            stage: Stage::Ocr,
+            state: StageState::Ran { elapsed_ms: 1.5, items: 3 },
+        })
+        .unwrap();
+        assert_eq!(ran, serde_json::json!({"stage": "ocr", "state": "ran", "elapsed_ms": 1.5, "items": 3}));
+        let failed = serde_json::to_value(StageStatus {
+            stage: Stage::Orientation,
+            state: StageState::Failed { reason: "boom".into() },
+        })
+        .unwrap();
+        assert_eq!(failed, serde_json::json!({"stage": "orientation", "state": "failed", "reason": "boom"}));
+        let skipped = serde_json::to_value(StageStatus {
+            stage: Stage::Layout,
+            state: StageState::Skipped { reason: "x".into() },
+        })
+        .unwrap();
+        assert_eq!(skipped, serde_json::json!({"stage": "layout", "state": "skipped", "reason": "x"}));
     }
 }

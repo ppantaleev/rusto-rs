@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **layout**: PP-DocLayoutV3 support (25 labels, [N,7] output, reading order)
 
 ### Changed
+- **doc**: DocPipelineConfig is #[non_exhaustive]; use DocPipelineConfig::new(layout, ocr) and with_* builders
 - **layout**: LayoutConfig defaults 800 px, mean 0/std 1, conf_thresh 0.5 (was 0.4, unused); LayoutType is #[non_exhaustive]
 
 ## [0.3.2] - 2026-10-25

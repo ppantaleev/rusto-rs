@@ -61,12 +61,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (None, None)
     };
 
-    let config = DocPipelineConfig {
-        layout: layout_config,
-        ocr: ocr_config,
-        table_detector,
-        table_recognizer,
-    };
+    let mut config = DocPipelineConfig::new(layout_config, ocr_config);
+    if let Some(d) = table_detector {
+        config = config.with_table_detector(d);
+    }
+    if let Some(r) = table_recognizer {
+        config = config.with_table_recognizer(r);
+    }
 
     let mut pipeline = DocPipeline::new(config)?;
     let result = pipeline.run(&args.image)?;
