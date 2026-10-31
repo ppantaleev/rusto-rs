@@ -1,14 +1,15 @@
 use clap::{Parser, ValueEnum};
 use rusto::image_impl::{imread, imwrite};
 use rusto::{
-    DetectTextResult, DocPipeline, DocPipelineConfig, ImageSource, InitializeConfig, LayoutConfig, OcrRunOptions,
-    OrientConfig, RustO, TableStructureConfig,
+    DetectTextResult, DocPipeline, DocPipelineConfig, DocResult, ImageSource, InitializeConfig, LayoutConfig,
+    OcrRunOptions, OrientConfig, RustO, StageState, TableStructureConfig,
 };
 use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "rusto")]
 #[command(about = "RustO! - Pure Rust OCR powered by PaddleOCR engine", long_about = None)]
+#[command(after_long_help = "Exit codes:\n  0  success\n  1  error (the run did not produce a result)\n  2  invalid command line\n  3  a document or markdown run produced its full output, but at least one stage failed;\n     one `warning: stage <name> failed: <reason>` line per failed stage is written to stderr")]
 struct Cli {
     /// Path to detection model (ONNX)
     #[arg(long)]
@@ -126,6 +127,27 @@ fn plan_run(cli: &Cli) -> Result<RunPlan, String> {
     })
 }
 
+/// Exit code of a document run that produced its output although a stage failed.
+const EXIT_STAGE_FAILED: i32 = 3;
+
+/// One `warning: stage <name> failed: <reason>` line per failed stage, in stage order.
+fn failed_stage_warnings(result: &DocResult) -> Vec<String> {
+    result
+        .stages
+        .iter()
+        .filter_map(|status| match &status.state {
+            StageState::Failed { reason } => {
+                let name = serde_json::to_value(status.stage)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| format!("{:?}", status.stage));
+                Some(format!("warning: stage {name} failed: {reason}"))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let plan = plan_run(&cli).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -156,6 +178,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", result.to_markdown());
             } else {
                 println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            let warnings = failed_stage_warnings(&result);
+            for line in &warnings {
+                eprintln!("{line}");
+            }
+            if !warnings.is_empty() {
+                std::io::Write::flush(&mut std::io::stdout())?;
+                std::process::exit(EXIT_STAGE_FAILED);
             }
             return Ok(());
         }
@@ -223,6 +253,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusto::{DocStage, StageStatus};
 
     fn parse(extra: &[&str]) -> Result<Cli, clap::Error> {
         let mut a = vec!["rusto", "--det-model", "d", "--rec-model", "r", "--dict", "k", "img.png"];
@@ -283,5 +314,41 @@ mod tests {
         else {
             panic!()
         };
+    }
+    fn doc_result(stages: Vec<StageStatus>) -> DocResult {
+        DocResult { width: 1, height: 1, orientation: None, regions: vec![], stages, blocks: vec![] }
+    }
+    #[test]
+    fn failed_stage_warnings_list_only_failed_stages() {
+        let ran = StageState::Ran { elapsed_ms: 1.0, items: 2 };
+        let skipped = StageState::Skipped { reason: "table model not configured".into() };
+        let ok = doc_result(vec![
+            StageStatus { stage: DocStage::Orientation, state: skipped },
+            StageStatus { stage: DocStage::Layout, state: ran },
+        ]);
+        assert!(failed_stage_warnings(&ok).is_empty());
+        let bad = doc_result(vec![
+            StageStatus { stage: DocStage::Orientation, state: StageState::Failed { reason: "rotate failed".into() } },
+            StageStatus { stage: DocStage::Layout, state: StageState::Ran { elapsed_ms: 1.0, items: 6 } },
+            StageStatus {
+                stage: DocStage::Ocr,
+                state: StageState::Failed { reason: "1 of 3 regions failed: Preprocess error: x".into() },
+            },
+        ]);
+        assert_eq!(
+            failed_stage_warnings(&bad),
+            vec![
+                "warning: stage orientation failed: rotate failed".to_string(),
+                "warning: stage ocr failed: 1 of 3 regions failed: Preprocess error: x".to_string(),
+            ]
+        );
+    }
+    #[test]
+    fn exit_code_for_failed_stages_is_documented_in_help() {
+        let mut help = Vec::new();
+        <Cli as clap::CommandFactory>::command().write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+        assert!(help.contains("Exit codes"), "{help}");
+        assert!(help.contains("3 "), "{help}");
     }
 }

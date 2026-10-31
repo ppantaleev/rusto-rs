@@ -157,11 +157,24 @@ pub struct DocBlock {
 pub struct DocResult {
     pub width: u32,
     pub height: u32,
+    /// `None` when the orientation stage did not run **or** failed; see
+    /// [`DocResult::orientation_failed`] and `stages` to tell them apart.
     pub orientation: Option<PageOrientation>,
     pub regions: Vec<DocRegion>,
     pub stages: Vec<StageStatus>,
     #[serde(skip)]
     pub blocks: Vec<DocBlock>,
+}
+
+impl DocResult {
+    /// The failure reason when the orientation stage is `Failed` (the page was
+    /// not rotated). `None` when it ran or was skipped.
+    pub fn orientation_failed(&self) -> Option<&str> {
+        self.stages.iter().find_map(|s| match (&s.stage, &s.state) {
+            (DocStage::Orientation, StageState::Failed { reason }) => Some(reason.as_str()),
+            _ => None,
+        })
+    }
 }
 
 /// How the pipeline processes a layout region.
@@ -1109,6 +1122,27 @@ mod tests {
         assert_eq!(v["stages"][0]["stage"], "table");
         assert_eq!(v["stages"][0]["state"], "skipped");
         assert!(v.get("blocks").is_none());
+    }
+
+    #[test]
+    fn orientation_failed_tells_failed_from_skipped_and_ran() {
+        let with = |state: StageState| {
+            let mut r = result(vec![]);
+            r.stages = vec![
+                StageStatus { stage: DocStage::Layout, state: StageState::Failed { reason: "not orientation".into() } },
+                StageStatus { stage: DocStage::Orientation, state },
+            ];
+            r
+        };
+        // `orientation` is `None` in all three cases; only `orientation_failed` tells them apart.
+        let failed = with(StageState::Failed { reason: "rotate failed".into() });
+        assert!(failed.orientation.is_none());
+        assert_eq!(failed.orientation_failed(), Some("rotate failed"));
+        let skipped = with(StageState::Skipped { reason: "orientation model not configured".into() });
+        assert!(skipped.orientation.is_none());
+        assert_eq!(skipped.orientation_failed(), None);
+        assert_eq!(with(StageState::Ran { elapsed_ms: 1.0, items: 1 }).orientation_failed(), None);
+        assert_eq!(result(vec![]).orientation_failed(), None, "no orientation entry in stages");
     }
 
     #[test]
