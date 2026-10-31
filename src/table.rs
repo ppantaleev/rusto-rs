@@ -42,14 +42,8 @@ use opencv::prelude::*;
 #[cfg(not(feature = "use-opencv"))]
 use crate::image_impl::Mat;
 
-/// Bounding box for table cells
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
-pub struct BBox {
-    pub x_min: i32,
-    pub y_min: i32,
-    pub x_max: i32,
-    pub y_max: i32,
-}
+/// Bounding box for table cells: the same page-pixel box the layout stage uses.
+pub use crate::layout::BBox;
 
 /// Table cell information
 #[derive(Debug, Clone, serde::Serialize)]

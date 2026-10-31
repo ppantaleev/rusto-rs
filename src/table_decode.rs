@@ -30,7 +30,8 @@
 //! SOFTWARE.
 
 use crate::orient::probabilities;
-use crate::table::{BBox, TableCell, TableRow, TableStructure};
+use crate::layout::BBox;
+use crate::table::{TableCell, TableRow, TableStructure};
 use crate::TextResult;
 use ndarray::ArrayView2;
 
@@ -286,10 +287,11 @@ pub(crate) fn decode_structure_tokens(tokens: &[&str]) -> DecodedGrid {
 /// (the same mapping as `bobine` `rapid_table.rs`). x is clamped to
 /// `[0, crop_w]`, y to `[0, crop_h]`, the box is the min/max of the four
 /// points truncated to integers, and `origin` (the crop's top-left on the
-/// page) is added. Returns `None` for a quad shorter than 8 values or one
-/// whose values are all below `1e-6` (a cell the model gave no location).
+/// page) is added. Returns `None` for a quad shorter than 8 values, one with
+/// a non-finite value (NaN or infinity), or one whose values are all below
+/// `1e-6` (a cell the model gave no location).
 pub(crate) fn quad_to_bbox(quad: &[f32], crop_w: u32, crop_h: u32, origin: (i32, i32)) -> Option<BBox> {
-    if quad.len() < 8 || quad[..8].iter().all(|&v| v < 1e-6) {
+    if quad.len() < 8 || quad[..8].iter().any(|v| !v.is_finite()) || quad[..8].iter().all(|&v| v < 1e-6) {
         return None;
     }
     let scale = crop_w.max(crop_h) as f32;
@@ -358,10 +360,6 @@ pub(crate) fn build_structure(
     }
 }
 
-fn box_area(b: &BBox) -> i64 {
-    (b.x_max - b.x_min).max(0) as i64 * (b.y_max - b.y_min).max(0) as i64
-}
-
 /// Intersection over union of a line frame and a cell box.
 fn frame_iou(line: &TextResult, b: &BBox) -> f32 {
     let f = &line.frame;
@@ -369,7 +367,7 @@ fn frame_iou(line: &TextResult, b: &BBox) -> f32 {
     let iw = (fx1.min(b.x_max as f32) - fx0.max(b.x_min as f32)).max(0.0);
     let ih = (fy1.min(b.y_max as f32) - fy0.max(b.y_min as f32)).max(0.0);
     let inter = iw * ih;
-    let union = f.width.max(0.0) * f.height.max(0.0) + box_area(b) as f32 - inter;
+    let union = f.width.max(0.0) * f.height.max(0.0) + b.area() as f32 - inter;
     if inter > 0.0 && union > 0.0 {
         inter / union
     } else {
@@ -385,7 +383,7 @@ fn target_cell(line: &TextResult, boxes: &[BBox]) -> Option<usize> {
     let mut best: Option<(usize, i64)> = None;
     for (i, b) in boxes.iter().enumerate() {
         let inside = cx >= b.x_min as f32 && cx <= b.x_max as f32 && cy >= b.y_min as f32 && cy <= b.y_max as f32;
-        let area = box_area(b);
+        let area = b.area();
         if inside && area > 0 && best.is_none_or(|(_, a)| area < a) {
             best = Some((i, area));
         }
@@ -738,7 +736,8 @@ mod tests {
         assert!(t[0].prob > 0.9 && t[0].prob < 1.0);
     }
 
-    use crate::table::{BBox, TableCell, TableRow, TableStructure};
+    use crate::layout::BBox;
+    use crate::table::{TableCell, TableRow, TableStructure};
     use crate::{Frame, TextResult};
 
     fn line(text: &str, l: f32, t: f32, w: f32, h: f32) -> TextResult {
@@ -785,6 +784,10 @@ mod tests {
         let b = quad_to_bbox(&[0.2, 0.9, 1.5, 0.9, 1.5, 0.95, 0.2, 0.95], 100, 50, (0, 0)).unwrap();
         assert_eq!((b.x_min, b.y_min, b.x_max, b.y_max), (20, 50, 100, 50));
         assert!(quad_to_bbox(&[0.1, 0.1, 0.2], 100, 50, (0, 0)).is_none());
+        assert!(quad_to_bbox(&[f32::NAN; 8], 100, 50, (0, 0)).is_none());
+        let mut inf = [0.1, 0.1, 0.5, 0.1, 0.5, 0.2, 0.1, 0.2];
+        inf[4] = f32::INFINITY;
+        assert!(quad_to_bbox(&inf, 100, 50, (0, 0)).is_none());
     }
 
     #[test]

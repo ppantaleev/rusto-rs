@@ -626,6 +626,11 @@ mod tests {
         }
     }
     #[test]
+    fn rotate_box_back_accepts_table_cell_boxes() {
+        let cell: crate::table::BBox = BBox { x_min: 20, y_min: 10, x_max: 50, y_max: 30 };
+        assert_eq!(rotate_box_back(&rotate_box(&cell, 90, 200, 100), 90, 100, 200), cell);
+    }
+    #[test]
     fn correction_is_inverse_of_label() {
         for o in [Orientation::Normal, Orientation::Rotate90, Orientation::Rotate180, Orientation::Rotate270] {
             assert_eq!((o.label_degrees() + o.correction_cw_degrees()) % 360, 0);

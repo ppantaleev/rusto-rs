@@ -740,7 +740,7 @@ mod tests {
     fn grid(col_span: usize) -> TableStructure {
         use crate::table::{TableCell, TableRow};
         let cell = |row: usize, col: usize, span: usize| TableCell {
-            bbox: crate::table::BBox { x_min: 0, y_min: 0, x_max: 1, y_max: 1 },
+            bbox: BBox { x_min: 0, y_min: 0, x_max: 1, y_max: 1 },
             row,
             col,
             row_span: 1,
