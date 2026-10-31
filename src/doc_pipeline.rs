@@ -221,6 +221,41 @@ fn join_texts(lines: &[TextResult]) -> String {
     lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" ")
 }
 
+/// Crop `bbox` from the page. Returns the crop and its origin in the page.
+fn crop_region(page: &Mat, bbox: &BBox) -> Result<(Mat, i32, i32), EngineError> {
+    let (page_w, page_h) = mat_size(page)?;
+    let (x, y, w, h) = clamp_crop(bbox, page_w, page_h)
+        .ok_or_else(|| EngineError::ImageError("Invalid crop region".to_string()))?;
+    Ok((crop_mat(page, x, y, w, h)?, x, y))
+}
+
+/// Crop a text region and read it with `ocr(crop, offset)`, which returns
+/// lines in the page coordinates given by the crop origin `offset`. A
+/// `vertical` region goes through [`ocr_both_rotations`] instead.
+fn read_text_region(
+    page: &Mat,
+    bbox: &BBox,
+    vertical: bool,
+    mut ocr: impl FnMut(&Mat, (i32, i32)) -> Result<Vec<TextResult>, EngineError>,
+) -> Result<Vec<TextResult>, EngineError> {
+    let (crop, x, y) = crop_region(page, bbox)?;
+    if vertical {
+        ocr_both_rotations(&crop, (x, y), |rotated| ocr(rotated, (0, 0)))
+    } else {
+        ocr(&crop, (x, y))
+    }
+}
+
+/// OCR output as text lines shifted by `offset`, in reading order. The
+/// detector returns boxes sorted only by integer top-left y, so words of one
+/// text line can interleave; the lines are put in reading order (bands of equal
+/// height top to bottom, each band left to right).
+fn finish_lines(boxes: &[[Point2f; 4]], txts: &[String], scores: &[f32], offset: (i32, i32)) -> Vec<TextResult> {
+    let mut lines = lines_from_ocr(boxes, txts, scores, offset);
+    reading_order(&mut lines);
+    lines
+}
+
 /// Read `crop` after rotating it 90 degrees clockwise and 90 degrees
 /// counter-clockwise (vertical text), keep the reading with the higher
 /// [`mean_score`] (tie: clockwise) and return its lines in the unrotated
@@ -475,35 +510,18 @@ impl DocPipeline {
         Ok((result, corrected))
     }
 
-    /// Crop `bbox` from the page. Returns the crop and its origin in the page.
-    fn crop_region(&self, page: &Mat, bbox: &BBox) -> Result<(Mat, i32, i32), EngineError> {
-        let (page_w, page_h) = mat_size(page)?;
-        let (x, y, w, h) = clamp_crop(bbox, page_w, page_h)
-            .ok_or_else(|| EngineError::ImageError("Invalid crop region".to_string()))?;
-        Ok((crop_mat(page, x, y, w, h)?, x, y))
-    }
-
     /// OCR one crop with page orientation off (the pipeline already corrected
-    /// the page) and return lines shifted by `offset`. The detector returns
-    /// boxes sorted only by integer top-left y, so words of one text line can
-    /// interleave; the lines are put in reading order (bands of equal height
-    /// top to bottom, each band left to right).
+    /// the page) and return lines shifted by `offset`, in reading order.
     fn ocr_lines(&mut self, crop: &Mat, offset: (i32, i32)) -> Result<Vec<TextResult>, EngineError> {
         let options = crate::OcrRunOptions { orientation: Some(false), ..Default::default() };
         let ocr = self.ocr.run_on_mat_with_options(crop, &options)?;
-        let mut lines = lines_from_ocr(&ocr.boxes, &ocr.txts, &ocr.scores, offset);
-        reading_order(&mut lines);
-        Ok(lines)
+        Ok(finish_lines(&ocr.boxes, &ocr.txts, &ocr.scores, offset))
     }
 
     /// OCR a text region; `vertical` tries the crop rotated 90 degrees
     /// clockwise and counter-clockwise. Lines are in page coordinates.
     fn ocr_region(&mut self, page: &Mat, bbox: &BBox, vertical: bool) -> Result<Vec<TextResult>, EngineError> {
-        let (crop, x, y) = self.crop_region(page, bbox)?;
-        if !vertical {
-            return self.ocr_lines(&crop, (x, y));
-        }
-        ocr_both_rotations(&crop, (x, y), |rotated| self.ocr_lines(rotated, (0, 0)))
+        read_text_region(page, bbox, vertical, |crop, offset| self.ocr_lines(crop, offset))
     }
 
     /// Process a table region: OCR the crop once, recognise the structure in
@@ -511,7 +529,7 @@ impl DocPipeline {
     /// crop or the OCR fails; a structure failure comes back inside the outcome
     /// together with the OCR lines.
     fn process_table(&mut self, page: &Mat, bbox: &BBox) -> Result<TableOutcome, EngineError> {
-        let (crop, x, y) = self.crop_region(page, bbox)?;
+        let (crop, x, y) = crop_region(page, bbox)?;
         let lines = self.ocr_lines(&crop, (x, y))?;
         let recognizer = self
             .table_recognizer
@@ -892,9 +910,7 @@ mod tests {
         let options = crate::OcrRunOptions { orientation: Some(false), ..Default::default() };
         let lines = ocr_both_rotations(&sideways, (1000, 2000), |m| {
             let out = ocr.run_on_mat_with_options(m, &options)?;
-            let mut l = lines_from_ocr(&out.boxes, &out.txts, &out.scores, (0, 0));
-            reading_order(&mut l);
-            Ok(l)
+            Ok(finish_lines(&out.boxes, &out.txts, &out.scores, (0, 0)))
         })
         .unwrap();
         let text = join_texts(&lines);
@@ -908,6 +924,62 @@ mod tests {
         // Turning counter-clockwise puts the top of the upright crop at the left edge.
         assert!(lines[0].frame.left < 1000.0 + 150.0 / 2.0, "{:?}", lines[0].frame);
         assert!(lines.last().unwrap().frame.left > 1000.0 + 150.0 / 2.0, "{:?}", lines.last().unwrap().frame);
+    }
+
+    #[cfg(not(feature = "use-opencv"))]
+    #[test]
+    fn finish_lines_orders_interleaved_words_and_adds_offset() {
+        let p = |x: f32, y: f32, w: f32| [Point2f { x, y }, Point2f { x: x + w, y }, Point2f { x: x + w, y: y + 20.0 }, Point2f { x, y: y + 20.0 }];
+        // Detector order (sorted by integer y): two text lines whose words alternate in y.
+        let boxes = [p(10.0, 0.0, 30.0), p(60.0, 1.0, 30.0), p(100.0, 2.0, 30.0), p(10.0, 40.0, 30.0), p(60.0, 41.0, 30.0)];
+        let boxes = [boxes[0], boxes[2], boxes[3], boxes[1], boxes[4]]; // y: 0, 2, 40, 1, 41
+        let txts: Vec<String> = ["a1", "a3", "b1", "a2", "b2"].iter().map(|s| s.to_string()).collect();
+        let lines = finish_lines(&boxes, &txts, &[0.9; 5], (100, 200));
+        assert_eq!(join_texts(&lines), "a1 a2 a3 b1 b2");
+        assert_eq!(lines[0].box_points[0], (110.0, 200.0));
+    }
+
+    /// The wiring of the vertical route: the fake OCR sees the rotated crops and
+    /// returns a box inside each; after back-mapping and the crop origin the
+    /// result must lie inside the region on the page.
+    #[cfg(not(feature = "use-opencv"))]
+    #[test]
+    fn vertical_region_lines_land_inside_the_region_bbox() {
+        let page = Mat::new(image::DynamicImage::new_rgb8(400, 300));
+        let bbox = BBox { x_min: 100, y_min: 20, x_max: 160, y_max: 220 }; // 60 wide, 200 high
+        let inside = |lines: &[TextResult]| {
+            lines.iter().all(|l| {
+                let f = &l.frame;
+                f.left >= 100.0 && f.top >= 20.0 && f.left + f.width <= 160.0 && f.top + f.height <= 220.0
+            })
+        };
+        let mut seen = Vec::new();
+        for ccw_wins in [false, true] {
+            let mut call = 0;
+            let lines = read_text_region(&page, &bbox, true, |crop, offset| {
+                call += 1;
+                seen.push((mat_size(crop).unwrap(), offset));
+                // A box covering the left 150 x 15 pixels of the 200 x 60 rotated crop; the
+                // reading with the higher score wins.
+                let mut l = scored("x", if (call == 2) == ccw_wins { 0.9 } else { 0.5 });
+                l.box_points = [(0.0, 0.0), (150.0, 0.0), (150.0, 15.0), (0.0, 15.0)];
+                l.frame = Frame::from_points(&l.box_points);
+                Ok(vec![l])
+            })
+            .unwrap();
+            assert_eq!(lines.len(), 1);
+            assert!(inside(&lines), "{:?}", lines[0].frame);
+        }
+        // Both rotated crops are 200 x 60 and are read with offset (0, 0).
+        assert!(seen.iter().all(|s| *s == ((200, 60), (0, 0))), "{seen:?}");
+        // A horizontal region is read once, with the crop origin as offset.
+        let mut seen = Vec::new();
+        read_text_region(&page, &bbox, false, |crop, offset| {
+            seen.push((mat_size(crop).unwrap(), offset));
+            Ok(vec![])
+        })
+        .unwrap();
+        assert_eq!(seen, [((60, 200), (100, 20))]);
     }
 
     #[test]

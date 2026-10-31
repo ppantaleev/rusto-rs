@@ -403,9 +403,9 @@ fn target_cell(line: &TextResult, boxes: &[BBox]) -> Option<usize> {
     best.map(|(i, _)| i)
 }
 
-/// Order the lines of one cell for reading: lines whose vertical centres differ
-/// by at most half the smaller line height form a band, bands run top to
-/// bottom and each band left to right.
+/// Order text lines for reading (used for table cells and for whole text
+/// regions): lines whose vertical centres differ by at most half the smaller
+/// line height form a band, bands run top to bottom and each band left to right.
 pub(crate) fn reading_order(lines: &mut Vec<TextResult>) {
     let centre_y = |l: &TextResult| l.frame.top + l.frame.height / 2.0;
     lines.sort_by(|a, b| centre_y(a).total_cmp(&centre_y(b)));

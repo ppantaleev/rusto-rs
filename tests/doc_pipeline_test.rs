@@ -75,3 +75,81 @@ fn upright_page_regions_in_order_with_text_in_reading_order() {
     assert!(r.blocks[3].html.as_deref().unwrap().starts_with("<table>"));
     assert!(r.stages.iter().all(|s| matches!(s.state, StageState::Ran { .. })), "{:?}", r.stages);
 }
+
+const TOL: f32 = 6.0;
+
+fn inside(f: &rusto::Frame, b: &rusto::layout::BBox) -> bool {
+    f.left >= b.x_min as f32 - TOL
+        && f.top >= b.y_min as f32 - TOL
+        && f.left + f.width <= b.x_max as f32 + TOL
+        && f.top + f.height <= b.y_max as f32 + TOL
+}
+
+fn assert_in_page_space(r: &rusto::DocResult) {
+    for g in &r.regions {
+        // (a) text lines lie inside their region
+        for l in &g.lines {
+            assert!(inside(&l.frame, &g.bbox), "region {} line {:?} outside {:?}", g.index, l.frame, g.bbox);
+        }
+        // (b) cells and unassigned lines lie inside the table region
+        if let Some(t) = &g.table {
+            for c in t.rows.iter().flat_map(|row| &row.cells) {
+                let f = rusto::Frame::new(
+                    (c.bbox.x_max - c.bbox.x_min) as f32,
+                    (c.bbox.y_max - c.bbox.y_min) as f32,
+                    c.bbox.y_min as f32,
+                    c.bbox.x_min as f32,
+                );
+                assert!(inside(&f, &g.bbox), "cell {:?} outside {:?}", c.bbox, g.bbox);
+            }
+            assert!(t.unassigned_lines.iter().all(|l| inside(&l.frame, &g.bbox)));
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires RUSTO_TEST_MODELS and models/DocOCR"]
+fn rotated_page_gives_the_upright_result_in_corrected_page_space() {
+    let Some(mut pipeline) = pipeline() else { return };
+    let upright = image::open(fixture("page_text.png")).unwrap();
+    let (a, _) = pipeline.run_with_image(&Mat::new(upright.clone())).unwrap();
+    let (b, _) = pipeline.run_with_image(&Mat::new(upright.rotate90())).unwrap();
+    assert_eq!(a.orientation.unwrap().applied_degrees, 0);
+    assert_eq!(b.orientation.unwrap().applied_degrees, 270);
+    assert_in_page_space(&a);
+    assert_in_page_space(&b);
+
+    // (c) same regions, texts and boxes as for the upright page
+    assert_eq!((a.width, a.height), (b.width, b.height));
+    assert_eq!(a.regions.len(), b.regions.len());
+    for (x, y) in a.regions.iter().zip(&b.regions) {
+        assert_eq!((x.index, x.label), (y.index, y.label));
+        assert_eq!(x.text, y.text, "region {}", x.index);
+        let d = |p: i32, q: i32| (p - q).abs() <= 2;
+        assert!(
+            d(x.bbox.x_min, y.bbox.x_min) && d(x.bbox.y_min, y.bbox.y_min) && d(x.bbox.x_max, y.bbox.x_max) && d(x.bbox.y_max, y.bbox.y_max),
+            "region {}: {:?} vs {:?}",
+            x.index,
+            x.bbox,
+            y.bbox
+        );
+        assert_eq!(x.lines.len(), y.lines.len(), "region {}", x.index);
+        match (&x.table, &y.table) {
+            (Some(s), Some(t)) => {
+                assert_eq!((s.num_rows, s.num_cols), (t.num_rows, t.num_cols));
+                let cells = |t: &rusto::TableStructure| {
+                    t.rows.iter().flat_map(|r| r.cells.iter().map(|c| (c.text.clone(), c.bbox))).collect::<Vec<_>>()
+                };
+                let (cs, ct) = (cells(s), cells(t));
+                assert_eq!(cs.len(), ct.len());
+                for ((ta, ba), (tb, bb)) in cs.iter().zip(&ct) {
+                    assert_eq!(ta, tb);
+                    let d = |p: i32, q: i32| (p - q).abs() <= 3;
+                    assert!(d(ba.x_min, bb.x_min) && d(ba.y_min, bb.y_min) && d(ba.x_max, bb.x_max) && d(ba.y_max, bb.y_max), "{ba:?} vs {bb:?}");
+                }
+            }
+            (None, None) => {}
+            _ => panic!("table missing on one page, region {}", x.index),
+        }
+    }
+}
