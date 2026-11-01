@@ -437,6 +437,16 @@ impl RustO {
         let img = imread(image_path)?;
         self.run_on_mat_with_options(&img, options)
     }
+    /// Detect text boxes on `img` without recognition. Boxes are in the pixels
+    /// of `img`; no resize, padding or orientation step runs.
+    pub(crate) fn detect_boxes(
+        &mut self,
+        img: &Mat,
+        detection: Option<&DetectionRunOptions>,
+    ) -> Result<Vec<[Point2f; 4]>, EngineError> {
+        Ok(self.det.run_with_options(img, detection, None)?.boxes.unwrap_or_default())
+    }
+
     pub(crate) fn run_on_mat_with_options(
         &mut self,
         img: &Mat,

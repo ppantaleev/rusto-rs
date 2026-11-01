@@ -313,6 +313,105 @@ fn clamp_crop(bbox: &BBox, page_w: i32, page_h: i32) -> Option<(i32, i32, u32, u
     Some((x0, y0, (x1 - x0) as u32, (y1 - y0) as u32))
 }
 
+/// Axis-aligned box of a detected text quad.
+fn quad_bbox(quad: &[Point2f; 4]) -> BBox {
+    let xs = quad.iter().map(|p| p.x);
+    let ys = quad.iter().map(|p| p.y);
+    BBox {
+        x_min: xs.clone().fold(f32::MAX, f32::min).floor() as i32,
+        y_min: ys.clone().fold(f32::MAX, f32::min).floor() as i32,
+        x_max: xs.fold(f32::MIN, f32::max).ceil() as i32,
+        y_max: ys.fold(f32::MIN, f32::max).ceil() as i32,
+    }
+}
+
+fn center_in(b: &BBox, region: &BBox) -> bool {
+    let cx = (b.x_min + b.x_max) / 2;
+    let cy = (b.y_min + b.y_max) / 2;
+    cx >= region.x_min && cx < region.x_max && cy >= region.y_min && cy < region.y_max
+}
+
+/// A text box counts as covered when its centre lies in a layout region or
+/// at least half of its area does.
+fn is_covered(b: &BBox, covered: &[BBox]) -> bool {
+    let area = b.area();
+    covered.iter().any(|r| center_in(b, r) || (area > 0 && b.intersection_area(r) * 2 >= area))
+}
+
+/// Group the detected text boxes that no layout region covers into blocks.
+/// Two boxes join a block when their x ranges overlap and the vertical gap
+/// between them is at most 0.8 of the smaller box height (overlap counts as a
+/// negative gap). Blocks are returned top to bottom as the union of their
+/// boxes.
+fn uncovered_blocks(boxes: &[BBox], covered: &[BBox]) -> Vec<BBox> {
+    let free: Vec<BBox> = boxes
+        .iter()
+        .filter(|b| b.x_max > b.x_min && b.y_max > b.y_min && !is_covered(b, covered))
+        .copied()
+        .collect();
+    let mut parent: Vec<usize> = (0..free.len()).collect();
+    fn find(parent: &mut [usize], i: usize) -> usize {
+        let mut r = i;
+        while parent[r] != r {
+            r = parent[r];
+        }
+        let mut c = i;
+        while parent[c] != r {
+            let next = parent[c];
+            parent[c] = r;
+            c = next;
+        }
+        r
+    }
+    for i in 0..free.len() {
+        for j in i + 1..free.len() {
+            let (a, b) = (&free[i], &free[j]);
+            let x_overlap = a.x_min.max(b.x_min) < a.x_max.min(b.x_max);
+            let gap = a.y_min.max(b.y_min) - a.y_max.min(b.y_max);
+            let limit = ((a.y_max - a.y_min).min(b.y_max - b.y_min) as f32 * 0.8) as i32;
+            if x_overlap && gap <= limit {
+                let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                parent[ri] = rj;
+            }
+        }
+    }
+    let mut blocks: Vec<(usize, BBox)> = Vec::new();
+    for (i, b) in free.iter().enumerate() {
+        let root = find(&mut parent, i);
+        match blocks.iter_mut().find(|(r, _)| *r == root) {
+            Some((_, u)) => {
+                u.x_min = u.x_min.min(b.x_min);
+                u.y_min = u.y_min.min(b.y_min);
+                u.x_max = u.x_max.max(b.x_max);
+                u.y_max = u.y_max.max(b.y_max);
+            }
+            None => blocks.push((root, *b)),
+        }
+    }
+    let mut out: Vec<BBox> = blocks.into_iter().map(|(_, b)| b).collect();
+    out.sort_by_key(|b| (b.y_min, b.x_min));
+    out
+}
+
+/// Axis-aligned box of a recognised line.
+fn quad_bbox_of(line: &TextResult) -> BBox {
+    BBox {
+        x_min: line.frame.left.floor() as i32,
+        y_min: line.frame.top.floor() as i32,
+        x_max: (line.frame.left + line.frame.width).ceil() as i32,
+        y_max: (line.frame.top + line.frame.height).ceil() as i32,
+    }
+}
+
+/// Position in `regions` where a new block with top edge `y_min` goes: before
+/// the first region that starts lower, else at the end.
+fn insert_position(regions: &[DocRegion], y_min: i32) -> usize {
+    regions.iter().position(|r| r.bbox.y_min > y_min).unwrap_or(regions.len())
+}
+
+/// Pixels added around a recovered block before it is read.
+const UNCOVERED_PAD: i32 = 4;
+
 /// Time, region count and first error of the regions that went through one
 /// processing branch (plain OCR or tables). Durations of the branches add up
 /// without overlap because each region is timed in exactly one branch.
@@ -506,6 +605,63 @@ impl DocPipeline {
                 html: region.table.as_ref().map(TableStructure::to_html),
             });
             regions.push(region);
+        }
+
+        // 4. Text outside every layout region: one detection pass on the page,
+        // blocks of boxes not covered by a region are read as `text` regions.
+        let covered: Vec<BBox> = regions.iter().map(|r: &DocRegion| r.bbox).collect();
+        let det_opts = crop_ocr_options().detection;
+        let uncovered_started = Instant::now();
+        match self.ocr.detect_boxes(&corrected, det_opts.as_ref()) {
+            Err(e) => ocr_stats.record(uncovered_started.elapsed(), Err(&e)),
+            Ok(quads) => {
+                let boxes: Vec<BBox> = quads.iter().map(quad_bbox).collect();
+                for block in uncovered_blocks(&boxes, &covered) {
+                    let started = Instant::now();
+                    let padded = BBox {
+                        x_min: block.x_min - UNCOVERED_PAD,
+                        y_min: block.y_min - UNCOVERED_PAD,
+                        x_max: block.x_max + UNCOVERED_PAD,
+                        y_max: block.y_max + UNCOVERED_PAD,
+                    };
+                    let outcome = self.ocr_region(&corrected, &padded, false);
+                    ocr_stats.record(started.elapsed(), outcome.as_ref().map(|_| ()));
+                    let Ok(mut lines) = outcome else { continue };
+                    lines.retain(|l| !is_covered(&quad_bbox_of(l), &covered));
+                    if lines.is_empty() {
+                        continue;
+                    }
+                    let score = mean_score(&lines);
+                    let at = insert_position(&regions, block.y_min);
+                    let reading_order = if at > 0 { blocks[at - 1].region.reading_order } else { 0.0 };
+                    let region = DocRegion {
+                        index: at,
+                        label: LayoutType::Text,
+                        bbox: block,
+                        score,
+                        text: Some(join_texts(&lines)),
+                        lines,
+                        table: None,
+                    };
+                    blocks.insert(
+                        at,
+                        DocBlock {
+                            region: LayoutRegion {
+                                bbox: region.bbox,
+                                layout_type: region.label,
+                                confidence: region.score,
+                                reading_order,
+                            },
+                            text: region.text.clone(),
+                            html: None,
+                        },
+                    );
+                    regions.insert(at, region);
+                }
+                for (i, r) in regions.iter_mut().enumerate() {
+                    r.index = i;
+                }
+            }
         }
 
         let table_state = if !table_configured {
@@ -864,6 +1020,50 @@ mod tests {
             num_cols: 2,
             unassigned_lines: vec![],
         }
+    }
+
+    fn bb(x0: i32, y0: i32, x1: i32, y1: i32) -> BBox { BBox { x_min: x0, y_min: y0, x_max: x1, y_max: y1 } }
+
+    #[test]
+    fn uncovered_box_becomes_a_block() {
+        let covered = [bb(0, 0, 500, 100)];
+        let blocks = uncovered_blocks(&[bb(10, 300, 400, 340)], &covered);
+        assert_eq!(blocks, vec![bb(10, 300, 400, 340)]);
+    }
+
+    #[test]
+    fn covered_box_is_not_duplicated() {
+        let covered = [bb(0, 0, 500, 100)];
+        // centre inside
+        assert!(uncovered_blocks(&[bb(10, 20, 400, 60)], &covered).is_empty());
+        // centre outside but more than half of the area inside
+        assert!(uncovered_blocks(&[bb(10, 20, 400, 120)], &covered).is_empty());
+    }
+
+    #[test]
+    fn adjacent_lines_group_and_distant_lines_do_not() {
+        let covered = [bb(0, 0, 500, 100)];
+        let boxes = [bb(10, 300, 400, 340), bb(10, 350, 380, 390), bb(10, 400, 300, 440), bb(10, 800, 400, 840)];
+        let blocks = uncovered_blocks(&boxes, &covered);
+        assert_eq!(blocks, vec![bb(10, 300, 400, 440), bb(10, 800, 400, 840)]);
+    }
+
+    #[test]
+    fn lines_side_by_side_stay_separate_blocks() {
+        let blocks = uncovered_blocks(&[bb(10, 300, 100, 340), bb(300, 300, 400, 340)], &[]);
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[test]
+    fn new_block_is_inserted_in_reading_order() {
+        let mut a = reg(0, LayoutType::Text, "a");
+        a.bbox = bb(0, 0, 10, 100);
+        let mut b = reg(1, LayoutType::Number, "b");
+        b.bbox = bb(0, 900, 10, 950);
+        let regs = [a, b];
+        assert_eq!(insert_position(&regs, 500), 1);
+        assert_eq!(insert_position(&regs, 960), 2);
+        assert_eq!(insert_position(&regs, -5), 0);
     }
 
     #[test]
