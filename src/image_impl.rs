@@ -65,6 +65,19 @@ mod rust_impl {
 
     pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+    /// The perspective matrix cannot be inverted. Callers that can tolerate a bad
+    /// quad (the text-box crop) find it with `downcast_ref` on the boxed error.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SingularMatrixError;
+
+    impl std::fmt::Display for SingularMatrixError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Matrix is not invertible")
+        }
+    }
+
+    impl std::error::Error for SingularMatrixError {}
+
     #[derive(Clone)]
     pub struct Mat {
         image: DynamicImage,
@@ -356,7 +369,7 @@ mod rust_impl {
             m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], m[2][0], m[2][1], m[2][2],
         );
 
-        let inv = mat.try_inverse().ok_or("Matrix is not invertible")?;
+        let inv = mat.try_inverse().ok_or(SingularMatrixError)?;
 
         Ok([
             [inv[(0, 0)], inv[(0, 1)], inv[(0, 2)]],

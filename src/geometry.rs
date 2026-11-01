@@ -102,11 +102,23 @@ fn get_padding_h(h: i32, w: i32, width_height_ratio: f32, min_height: f32) -> i3
     (new_h - h).abs() / 2
 }
 
-/// True when `get_rotate_crop_image` would produce an image with no pixels:
-/// the longer opposite edge in either direction is shorter than 1 px (the crop
-/// size is truncated to whole pixels), or a coordinate is not finite. Detection
-/// boxes are clamped to the page, so a box lying outside it collapses onto the
-/// edge as a zero-height or zero-width quad.
+/// Smallest sine of a vertex angle for a quad to count as a quad. Three vertices
+/// closer to a line than this make the homography to the crop rectangle singular
+/// or so ill-conditioned that the crop is noise. A real text box has angles near
+/// 90 degrees; 0.01 is about 0.57 degrees.
+const MIN_VERTEX_SINE: f32 = 0.01;
+
+/// True when `get_rotate_crop_image` cannot produce a usable crop:
+/// - a coordinate is not finite;
+/// - the longer opposite edge in either direction is shorter than 1 px (the crop
+///   size is truncated to whole pixels). Detection boxes are clamped to the page,
+///   so a box lying outside it collapses onto the edge as a flat quad;
+/// - two vertices coincide, or three vertices are (nearly) collinear, so the
+///   homography onto the crop rectangle is singular. A quad can have a non-zero
+///   bounding size and still be flat, for example `(12.9,271) (1019.1,250.8)
+///   (1021.1,271) (14.8,271)`, where three vertices lie on one line;
+/// - the vertices are not in a consistent winding order (self-intersecting or
+///   bow-tie quad).
 pub fn is_degenerate_quad(points: &[Point2f; 4]) -> bool {
     if points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite()) {
         return true;
@@ -117,7 +129,45 @@ pub fn is_degenerate_quad(points: &[Point2f; 4]) -> bool {
     let h = (points[0].x - points[3].x)
         .hypot(points[0].y - points[3].y)
         .max((points[1].x - points[2].x).hypot(points[1].y - points[2].y));
-    w < 1.0 || h < 1.0
+    if w < 1.0 || h < 1.0 {
+        return true;
+    }
+    // Sine and sign of the turn at each vertex, in f64 to keep tiny cross products exact.
+    let mut sign = 0.0f64;
+    for i in 0..4 {
+        let prev = &points[(i + 3) % 4];
+        let cur = &points[i];
+        let next = &points[(i + 1) % 4];
+        let (ax, ay) = ((cur.x - prev.x) as f64, (cur.y - prev.y) as f64);
+        let (bx, by) = ((next.x - cur.x) as f64, (next.y - cur.y) as f64);
+        let len = ax.hypot(ay) * bx.hypot(by);
+        let cross = ax * by - ay * bx;
+        if len <= 0.0 || (cross.abs() / len) < MIN_VERTEX_SINE as f64 {
+            return true;
+        }
+        if sign == 0.0 {
+            sign = cross.signum();
+        } else if cross.signum() != sign {
+            return true;
+        }
+    }
+    false
+}
+
+/// A singular perspective matrix from the pure-Rust warp is a bad quad, not a
+/// failure of the image: it gives an empty crop. Other errors still propagate.
+#[cfg(not(feature = "use-opencv"))]
+fn empty_if_singular(result: ImgResult<Mat>) -> ImgResult<Mat> {
+    use image_impl::SingularMatrixError;
+    match result {
+        Err(e) if e.is::<SingularMatrixError>() => empty_crop(),
+        other => other,
+    }
+}
+
+#[cfg(feature = "use-opencv")]
+fn empty_if_singular(result: ImgResult<Mat>) -> ImgResult<Mat> {
+    result
 }
 
 /// An image with no pixels. The recogniser maps it to an empty line.
@@ -132,14 +182,14 @@ fn empty_crop() -> ImgResult<Mat> {
     }
 }
 
-/// Crop one detected text box. A degenerate box gives an empty image instead of
+/// Crop one detected text box. A degenerate or singular box gives an empty image instead of
 /// an error, so one bad box cannot fail the recognition of the whole image and
 /// the result list stays aligned with the detection boxes.
 pub fn crop_text_box(img: &Mat, points: &[Point2f; 4]) -> ImgResult<Mat> {
     if is_degenerate_quad(points) {
         return empty_crop();
     }
-    get_rotate_crop_image(img, points)
+    empty_if_singular(get_rotate_crop_image(img, points))
 }
 
 #[cfg(feature = "use-opencv")]
@@ -514,6 +564,75 @@ mod degenerate_box_tests {
         let collapsed = [Point2f::new(7.0, 7.0); 4];
         let crop = crop_text_box(&img, &collapsed).expect("fully collapsed quad: no error");
         assert!(crop.rows() <= 0 || crop.cols() <= 0);
+    }
+
+    fn q(p: [(f32, f32); 4]) -> [Point2f; 4] {
+        p.map(|(x, y)| Point2f::new(x, y))
+    }
+
+    /// Quads that the detector produced on real scanned pages (300 dpi): they pass the
+    /// size test, but three or four vertices are collinear, so the homography is singular.
+    const REAL_SINGULAR_QUADS: [[(f32, f32); 4]; 5] = [
+        [(12.907542, 271.0), (1019.14856, 250.83234), (1021.054, 271.0), (14.813035, 271.0)],
+        [(2920.0972, 233.0), (2961.058, 233.0), (2953.0774, 233.0), (2912.1162, 233.0)],
+        [(2.1519995, 227.0), (2089.747, 202.23608), (2090.91, 227.0), (3.3146038, 227.0)],
+        [(5.148195, 219.0), (2094.2307, 193.55786), (2095.3652, 219.0), (6.28249, 219.0)],
+        [(0.22055307, 137.0), (322.9253, 137.0), (321.5627, 137.0), (0.0, 137.0)],
+    ];
+
+    #[test]
+    fn real_page_singular_quads_give_an_empty_crop_not_an_error() {
+        let img = Mat::from_rgb8(3000, 300, vec![200; 3000 * 300 * 3]).unwrap();
+        for (i, raw) in REAL_SINGULAR_QUADS.iter().enumerate() {
+            let b = q(*raw);
+            assert!(is_degenerate_quad(&b), "real quad {i} must be rejected");
+            let crop = crop_text_box(&img, &b).unwrap_or_else(|e| panic!("real quad {i}: {e}"));
+            assert!(crop.rows() <= 0 || crop.cols() <= 0, "real quad {i}");
+        }
+    }
+
+    #[test]
+    fn collinear_coincident_and_self_intersecting_quads_are_degenerate() {
+        let img = page();
+        let cases: [(&str, [(f32, f32); 4]); 5] = [
+            ("collinear diagonal", [(0.0, 0.0), (30.0, 30.0), (60.0, 60.0), (90.0, 90.0)]),
+            ("three collinear", [(10.0, 5.0), (60.0, 5.0), (90.0, 5.0), (10.0, 25.0)]),
+            ("coincident points", [(10.0, 5.0), (10.0, 5.0), (60.0, 25.0), (10.0, 25.0)]),
+            ("coincident opposite", [(10.0, 5.0), (60.0, 5.0), (10.0, 5.0), (10.0, 25.0)]),
+            ("bow-tie order", [(10.0, 5.0), (60.0, 25.0), (60.0, 5.0), (10.0, 25.0)]),
+        ];
+        for (name, raw) in cases {
+            let b = q(raw);
+            assert!(is_degenerate_quad(&b), "{name}");
+            let crop = crop_text_box(&img, &b).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(crop.rows() <= 0 || crop.cols() <= 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn legitimate_quads_are_not_degenerate() {
+        // thin wide line, rotated line and a perspective-skewed line all stay valid
+        assert!(!is_degenerate_quad(&q([(0.0, 0.0), (1000.0, 0.0), (1000.0, 2.0), (0.0, 2.0)])));
+        assert!(!is_degenerate_quad(&q([(10.0, 10.0), (60.0, 30.0), (50.0, 50.0), (0.0, 30.0)])));
+        assert!(!is_degenerate_quad(&q([(10.0, 5.0), (98.0, 8.0), (95.0, 30.0), (12.0, 27.0)])));
+        // counter-clockwise order is still a valid (mirrored) quad
+        assert!(!is_degenerate_quad(&q([(10.0, 5.0), (10.0, 25.0), (60.0, 25.0), (60.0, 5.0)])));
+    }
+
+    #[test]
+    fn singular_warp_error_is_typed_for_direct_callers_and_becomes_an_empty_crop() {
+        let singular = [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [0.0, 0.0, 1.0]];
+        let mut dst = Mat::default();
+        let err = image_impl::warp_perspective(&page(), &mut dst, &singular, Size::new(8, 8), 2, 0)
+            .expect_err("direct callers still get the error");
+        assert!(err.downcast_ref::<image_impl::SingularMatrixError>().is_some());
+        assert_eq!(err.to_string(), "Matrix is not invertible");
+
+        let recovered = empty_if_singular(Err(err)).expect("singular warp becomes an empty crop");
+        assert!(recovered.rows() <= 0 || recovered.cols() <= 0);
+        let other: ImgResult<Mat> = Err("SVD failed".into());
+        assert!(empty_if_singular(other).is_err(), "other errors still propagate");
+        assert!(empty_if_singular(Ok(page())).unwrap().cols() == 100);
     }
 
     #[test]

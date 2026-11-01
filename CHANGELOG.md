@@ -50,6 +50,7 @@ Entries by other contributors that landed in the history before this branch and 
 
 ### Fixed
 - **ocr**: A detection box that collapses to zero width or height (a box outside the page, clamped onto its edge) no longer fails the recognition of the whole image with `invalid image size`; its line is empty and the other lines are kept. In the document pipeline this had set the OCR stage to `Failed` and dropped all text of the region
+- **ocr**: A detection box whose four corners are flat (three or more corners on one line, two corners that coincide, a bow-tie order) no longer fails the recognition of the region with `Image processing error: Matrix is not invertible`, even when its bounding size is not zero. `geometry::is_degenerate_quad` now also rejects these quads, and `crop_text_box` turns a `SingularMatrixError` from the perspective warp into an empty crop; `image_impl::warp_perspective` still returns that typed error to direct callers. The line is empty (text `""`, score 0) and the other lines are kept. Seen on 5 of 3 899 scanned pages
 - **table**: A quad with a NaN or infinite value no longer produces a cell box (`quad_to_bbox` returns `None`)
 - **table**: Place colspan cells only where the whole span is free
 - **orient**: Do not re-apply softmax to models that already output probabilities
