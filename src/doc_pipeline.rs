@@ -534,9 +534,9 @@ impl DocPipeline {
     /// OCR one crop with page orientation off (the pipeline already corrected
     /// the page) and return lines shifted by `offset`, in reading order.
     fn ocr_lines(&mut self, crop: &Mat, offset: (i32, i32)) -> Result<Vec<TextResult>, EngineError> {
-        let options = crate::OcrRunOptions { orientation: Some(false), ..Default::default() };
-        let ocr = self.ocr.run_on_mat_with_options(crop, &options)?;
-        Ok(finish_lines(&ocr.boxes, &ocr.txts, &ocr.scores, offset))
+        let (padded, top) = pad_white_to_min_height(crop, CROP_MIN_HEIGHT)?;
+        let ocr = self.ocr.run_on_mat_with_options(&padded, &crop_ocr_options())?;
+        Ok(finish_lines(&ocr.boxes, &ocr.txts, &ocr.scores, (offset.0, offset.1 - top)))
     }
 
     /// OCR a text region; `vertical` tries the crop rotated 90 degrees
@@ -562,6 +562,64 @@ impl DocPipeline {
         });
         Ok(TableOutcome { lines, structure })
     }
+}
+
+/// Largest side the crop detector accepts without shrinking. Crops come from
+/// a page already limited to `GlobalConfig::max_side_len` (2000), plus the
+/// letterbox padding, so 8192 is never reached in practice.
+const CROP_DET_LIMIT: i32 = 8192;
+
+/// Options for OCR of a tight crop. The default PP-OCRv5 preset uses
+/// `limit_type = "min"` with `limit_side_len = 736`, which scales a crop
+/// whose short side is below 736 px up to 736 px (a 117 px high text line is
+/// enlarged about 6x). `"max"` with a large limit never enlarges and never
+/// shrinks, so the crop is detected at its own (page) scale. The generic
+/// pre-step would also letterbox a crop wider than 8x its height with black
+/// bands (`width_height_ratio` 8, `add_round_letterbox`); a text line on a
+/// black band is read badly, so the ratio rule is switched off (-1). Crops
+/// of 30 px or less still get the `min_height` padding. Short crops are
+/// padded with white to `CROP_MIN_HEIGHT` first (see `ocr_lines`).
+fn crop_ocr_options() -> crate::OcrRunOptions {
+    crate::OcrRunOptions {
+        orientation: Some(false),
+        detection: Some(crate::DetectionRunOptions {
+            limit_type: Some("max".to_string()),
+            limit_side_len: Some(CROP_DET_LIMIT),
+            ..Default::default()
+        }),
+        width_height_ratio: Some(-1.0),
+        ..Default::default()
+    }
+}
+
+/// Shortest crop height given to the detector. The detector rounds the height
+/// to a multiple of 32, so a 41 px line would be squeezed to 32 px and read
+/// as nothing; 128 px keeps every line at its own scale with white context.
+const CROP_MIN_HEIGHT: i32 = 128;
+
+/// Pad `img` with white above and below to at least `min_h` high. Returns the
+/// padded image and the number of rows added on top (subtract from y to map
+/// back).
+#[cfg(feature = "use-opencv")]
+fn pad_white_to_min_height(img: &Mat, min_h: i32) -> Result<(Mat, i32), EngineError> {
+    let h = img.rows();
+    if h >= min_h { return Ok((img.clone(), 0)); }
+    let top = (min_h - h) / 2;
+    let bottom = min_h - h - top;
+    let mut dst = Mat::default();
+    core::copy_make_border(img, &mut dst, top, bottom, 0, 0, core::BORDER_CONSTANT, core::Scalar::new(255.0, 255.0, 255.0, 0.0))?;
+    Ok((dst, top))
+}
+
+#[cfg(not(feature = "use-opencv"))]
+fn pad_white_to_min_height(img: &Mat, min_h: i32) -> Result<(Mat, i32), EngineError> {
+    let rgb = img.to_rgb8();
+    let (w, h) = rgb.dimensions();
+    if h as i64 >= min_h as i64 { return Ok((img.clone(), 0)); }
+    let top = (min_h as u32 - h) / 2;
+    let mut out = image::RgbImage::from_pixel(w, min_h as u32, image::Rgb([255, 255, 255]));
+    image::imageops::replace(&mut out, &rgb, 0, top as i64);
+    Ok((Mat::new(image::DynamicImage::ImageRgb8(out)), top as i32))
 }
 
 #[cfg(feature = "use-opencv")]
@@ -716,6 +774,52 @@ impl DocResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_crop_is_padded_white_and_offset_maps_back() {
+        let mut rgb = image::RgbImage::from_pixel(50, 41, image::Rgb([10, 20, 30]));
+        rgb.put_pixel(0, 0, image::Rgb([1, 2, 3]));
+        let crop = Mat::new(image::DynamicImage::ImageRgb8(rgb));
+        let (padded, top) = pad_white_to_min_height(&crop, 128).unwrap();
+        assert_eq!(mat_size(&padded).unwrap(), (50, 128));
+        assert_eq!(top, 43); // (128 - 41) / 2
+        let p = padded.to_rgb8();
+        assert_eq!(p.get_pixel(0, 0).0, [255, 255, 255]);
+        assert_eq!(p.get_pixel(0, 127).0, [255, 255, 255]);
+        assert_eq!(p.get_pixel(0, top as u32).0, [1, 2, 3], "crop row 0 lands at padded row `top`");
+        // a box at padded y = top + 5 is page y = offset_y + 5
+        let boxes = [[Point2f { x: 1.0, y: top as f32 + 5.0 }; 4]];
+        let lines = lines_from_ocr(&boxes, &["a".to_string()], &[0.9], (100, 200 - top));
+        assert_eq!(lines[0].box_points[0], (101.0, 205.0));
+        // tall enough: untouched
+        let (same, t0) = pad_white_to_min_height(&padded, 128).unwrap();
+        assert_eq!((mat_size(&same).unwrap(), t0), ((50, 128), 0));
+    }
+
+    #[test]
+    fn crop_detection_does_not_rescale_a_narrow_crop() {
+        use crate::preprocess::DetPreProcess;
+        let det = crop_ocr_options().detection.expect("detection options");
+        assert_eq!(det.limit_type.as_deref(), Some("max"));
+        let limit = det.limit_side_len.unwrap();
+        assert!(limit >= 2500, "limit must cover the largest crop");
+        // no black letterbox for a wide line
+        assert_eq!(crop_ocr_options().width_height_ratio, Some(-1.0));
+        let mut g = crate::types::GlobalConfig::default();
+        g.width_height_ratio = -1.0;
+        let wide = Mat::new(image::DynamicImage::new_rgb8(2131, 117));
+        let (padded, _) = crate::geometry::apply_vertical_padding(&wide, Default::default(), g.width_height_ratio, g.min_height).unwrap();
+        assert_eq!(mat_size(&padded).unwrap(), (2131, 117), "wide crop must stay unpadded");
+        // 117 px high, 2131 px wide synthetic strip: the default "min"/736
+        // preset gives 736 high; the crop options keep 117 (128 after rounding
+        // to a multiple of 32).
+        let img = Mat::new(image::DynamicImage::new_rgb8(2131, 117));
+        let pre = DetPreProcess::new(limit, det.limit_type.unwrap(), [0.5; 3], [0.5; 3]);
+        let out = pre.run(&img).unwrap();
+        assert_eq!(out.shape(), &[1, 3, 128, 2144]);
+        let old = DetPreProcess::new(736, "min".to_string(), [0.5; 3], [0.5; 3]).run(&img).unwrap();
+        assert_eq!(old.shape()[2], 736, "documents the old behaviour");
+    }
 
     fn cfg() -> DocPipelineConfig {
         DocPipelineConfig::new(LayoutConfig::default("l.rten"), InitializeConfig::ppv5("d", "r", "k"))
